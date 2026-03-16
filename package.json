@@ -1,0 +1,22 @@
+{
+  "name": "gptee-relay",
+  "version": "1.0.0",
+  "description": "GPTee P2P relay server",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "uuid": "^9.0.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
