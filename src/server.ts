@@ -76,16 +76,15 @@ function broadcastProviderList() {
     return loadA - loadB;
   });
 
-  // Send updated list to all connected peers (everyone is a user)
-  // Filter out each peer's own ID from their provider list
+  // Send updated list to all connected peers
+  // Include all providers (including the peer itself if they're a provider)
   peers.forEach((peer) => {
-    const filteredProviders = providerList.filter(p => p.peerId !== peer.peerId);
     send(peer.socket, {
       type: 'provider_list',
       id: uuidv4(),
       from: 'relay',
       timestamp: Date.now(),
-      providers: filteredProviders,
+      providers: providerList,
     });
   });
 }
