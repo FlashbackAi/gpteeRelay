@@ -8,6 +8,7 @@ import {
   InferenceDoneMessage,
   InferenceResponseMessage,
   ProviderInfo,
+  ProviderStatusMessage,
   WebRTCOfferMessage,
   WebRTCAnswerMessage,
   WebRTCIceCandidateMessage,
@@ -16,12 +17,21 @@ import {
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
 // ── Peer Registry ─────────────────────────────────────────────────────────────
+interface ProviderMetrics {
+  activeJobs: number;
+  queueDepth: number;
+  avgResponseTime: number; // ms
+  tokensPerSec: number;
+  lastUpdated: number;
+}
+
 interface Peer {
   peerId: string;
   role: 'user' | 'provider';
   socket: WebSocket;
   deviceInfo: RegisterMessage['deviceInfo'];
   connectedAt: number;
+  metrics?: ProviderMetrics; // Only for providers (acceptingJobs=true)
 }
 
 const peers = new Map<string, Peer>();
@@ -31,6 +41,18 @@ function send(socket: WebSocket, msg: GPTeeMessage) {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(msg));
   }
+}
+
+function calculateLoad(metrics?: ProviderMetrics): number {
+  if (!metrics) return 0; // No metrics = lowest priority
+
+  // Load score based on active jobs, queue depth, and response time
+  // Lower score = better (less loaded)
+  const jobWeight = metrics.activeJobs * 10;
+  const queueWeight = metrics.queueDepth * 5;
+  const responseWeight = metrics.avgResponseTime / 100; // normalize to ~10s range
+
+  return jobWeight + queueWeight + responseWeight;
 }
 
 function broadcastProviderList() {
@@ -47,14 +69,23 @@ function broadcastProviderList() {
     }
   });
 
+  // Sort providers by load (least loaded first) for load balancing
+  providerList.sort((a, b) => {
+    const loadA = calculateLoad(peers.get(a.peerId)?.metrics);
+    const loadB = calculateLoad(peers.get(b.peerId)?.metrics);
+    return loadA - loadB;
+  });
+
   // Send updated list to all connected peers (everyone is a user)
+  // Filter out each peer's own ID from their provider list
   peers.forEach((peer) => {
+    const filteredProviders = providerList.filter(p => p.peerId !== peer.peerId);
     send(peer.socket, {
       type: 'provider_list',
       id: uuidv4(),
       from: 'relay',
       timestamp: Date.now(),
-      providers: providerList,
+      providers: filteredProviders,
     });
   });
 }
@@ -72,6 +103,14 @@ function getProviders(): ProviderInfo[] {
       });
     }
   });
+
+  // Sort providers by load (least loaded first) for load balancing
+  list.sort((a, b) => {
+    const loadA = calculateLoad(peers.get(a.peerId)?.metrics);
+    const loadB = calculateLoad(peers.get(b.peerId)?.metrics);
+    return loadA - loadB;
+  });
+
   return list;
 }
 
@@ -95,9 +134,26 @@ function routeMessage(senderPeerId: string, raw: string) {
       if (peer) {
         peer.role = reg.role;
         peer.deviceInfo = reg.deviceInfo;
-        console.log(`[relay] 🔄 Updated registration: ${senderPeerId} (acceptingJobs: ${reg.deviceInfo.acceptingJobs})`);
+        console.log(`[relay] 🔄 Updated registration: ${senderPeerId} (acceptingJobs: ${reg.deviceInfo.acceptingJobs}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
         // Broadcast updated provider list
+        broadcastProviderList();
+      }
+      break;
+    }
+
+    case 'provider_status': {
+      // Update provider metrics for load balancing
+      const status = msg as ProviderStatusMessage;
+      const peer = peers.get(senderPeerId);
+      if (peer && peer.deviceInfo.acceptingJobs) {
+        peer.metrics = {
+          ...status.metrics,
+          lastUpdated: Date.now(),
+        };
+        console.log(`[relay] 📊 Updated metrics for ${senderPeerId}: activeJobs=${status.metrics.activeJobs}, queueDepth=${status.metrics.queueDepth}`);
+
+        // Broadcast updated provider list (sorted by new metrics)
         broadcastProviderList();
       }
       break;
@@ -259,7 +315,7 @@ wss.on('connection', (socket: WebSocket) => {
         connectedAt: Date.now(),
       });
 
-      console.log(`[relay] ✅ Registered: ${registeredId} as ${reg.role} (${reg.deviceInfo.platform})`);
+      console.log(`[relay] ✅ Registered: ${registeredId} as ${reg.role} (${reg.deviceInfo.platform}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
       // Ack registration
       send(socket, {
@@ -303,7 +359,7 @@ wss.on('listening', () => {
 
 // ── Health check every 30s ────────────────────────────────────────────────────
 setInterval(() => {
-  const providerCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
-  const userCount = [...peers.values()].filter((p) => p.role === 'user').length;
-  console.log(`[relay] 💓 peers=${peers.size} providers=${providerCount} users=${userCount}`);
+  const providersCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
+  const consumersCount = [...peers.values()].filter((p) => !p.deviceInfo.acceptingJobs).length;
+  console.log(`[relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount}`);
 }, 30_000);

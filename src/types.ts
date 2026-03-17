@@ -3,6 +3,7 @@ export type PeerRole = 'user' | 'provider';
 export type MessageType =
   | 'register'        // peer announces itself + role
   | 'provider_list'   // relay sends list of available providers
+  | 'provider_status' // provider sends metrics update to relay
   | 'inference_request'  // user → relay → provider
   | 'inference_response' // provider → relay → user
   | 'inference_stream'   // provider → relay → user (streaming token)
@@ -44,6 +45,16 @@ export interface ProviderInfo {
   modelName: string;
   platform: string;
   displayName?: string; // User-friendly device name
+}
+
+export interface ProviderStatusMessage extends BaseMessage {
+  type: 'provider_status';
+  metrics: {
+    activeJobs: number;
+    queueDepth: number;
+    avgResponseTime: number; // ms
+    tokensPerSec: number;
+  };
 }
 
 export interface InferenceRequestMessage extends BaseMessage {
@@ -121,6 +132,7 @@ export interface WebRTCIceCandidateMessage extends BaseMessage {
 export type GPTeeMessage =
   | RegisterMessage
   | ProviderListMessage
+  | ProviderStatusMessage
   | InferenceRequestMessage
   | InferenceResponseMessage
   | InferenceStreamMessage
