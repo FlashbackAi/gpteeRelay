@@ -14,7 +14,7 @@ import {
   WebRTCIceCandidateMessage,
 } from './types';
 
-const PORT = parseInt(process.env.PORT || '8080', 10);
+const PORT = parseInt(process.env.PORT || '9293', 10);
 
 // ── Peer Registry ─────────────────────────────────────────────────────────────
 interface ProviderMetrics {
