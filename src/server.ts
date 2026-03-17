@@ -36,6 +36,30 @@ interface Peer {
 
 const peers = new Map<string, Peer>();
 
+// ── Request Context Tracking (for failover) ───────────────────────────────────
+interface RequestContext {
+  requestId: string;
+  consumerId: string;
+  providerId: string;
+  prompt: string;
+  conversationHistory: any[]; // ChatMessage[]
+  startTime: number;
+  tokensReceived: number;
+  status: 'active' | 'completed' | 'failed';
+  retryCount: number;
+  lastHeartbeat: number;
+}
+
+const activeRequests = new Map<string, RequestContext>();
+
+// Failover configuration
+const FAILOVER_CONFIG = {
+  MAX_RETRIES: 3,
+  REQUEST_TIMEOUT_MS: 30_000, // 30 seconds
+  CLEANUP_DELAY_MS: 5 * 60 * 1000, // 5 minutes
+  HEALTH_CHECK_INTERVAL_MS: 10_000, // 10 seconds
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function send(socket: WebSocket, msg: GPTeeMessage) {
   if (socket.readyState === WebSocket.OPEN) {
@@ -57,7 +81,11 @@ function calculateLoad(metrics?: ProviderMetrics): number {
 
 function broadcastProviderList() {
   const providerList: ProviderInfo[] = [];
+
+  console.log(`[relay] 📋 Building provider list from ${peers.size} peers:`);
   peers.forEach((peer) => {
+    console.log(`[relay]   - ${peer.peerId.substring(0, 8)}: ${peer.deviceInfo.displayName} (accepting: ${peer.deviceInfo.acceptingJobs})`);
+
     // A peer is an available provider if they are accepting jobs
     if (peer.deviceInfo.acceptingJobs) {
       providerList.push({
@@ -67,6 +95,11 @@ function broadcastProviderList() {
         displayName: peer.deviceInfo.displayName,
       });
     }
+  });
+
+  console.log(`[relay] 📤 Broadcasting ${providerList.length} providers to ${peers.size} peers`);
+  providerList.forEach((p, i) => {
+    console.log(`[relay]   ${i + 1}. ${p.displayName} (${p.peerId.substring(0, 8)}...)`);
   });
 
   // Sort providers by load (least loaded first) for load balancing
@@ -111,6 +144,92 @@ function getProviders(): ProviderInfo[] {
   });
 
   return list;
+}
+
+function sendErrorToConsumer(consumerId: string, requestId: string, errorCode: string, errorMessage: string) {
+  const consumer = peers.get(consumerId);
+  if (consumer) {
+    send(consumer.socket, {
+      type: 'inference_error',
+      id: uuidv4(),
+      from: 'relay',
+      timestamp: Date.now(),
+      requestId,
+      code: errorCode,
+      message: errorMessage,
+    });
+  }
+}
+
+function handleProviderFailure(failedProviderId: string) {
+  // Find all requests assigned to this provider
+  const failedRequests = Array.from(activeRequests.values())
+    .filter(ctx => ctx.providerId === failedProviderId && ctx.status === 'active');
+
+  if (failedRequests.length === 0) return;
+
+  console.log(`[relay] 🔄 Provider ${failedProviderId} failed with ${failedRequests.length} active requests`);
+
+  // For each failed request, attempt reassignment
+  for (const context of failedRequests) {
+    // Skip if already retried too many times
+    if (context.retryCount >= FAILOVER_CONFIG.MAX_RETRIES) {
+      console.log(`[relay] ❌ Request ${context.requestId} exceeded retry limit`);
+      sendErrorToConsumer(context.consumerId, context.requestId, 'MAX_RETRIES_EXCEEDED', 'All providers failed. Maximum retry limit reached.');
+      activeRequests.delete(context.requestId);
+      continue;
+    }
+
+    // Find next best provider (excluding failed one)
+    const availableProviders = getProviders().filter(p => p.peerId !== failedProviderId);
+
+    if (availableProviders.length === 0) {
+      console.log(`[relay] ❌ No backup providers for request ${context.requestId}`);
+      sendErrorToConsumer(context.consumerId, context.requestId, 'NO_PROVIDERS_AVAILABLE', 'No alternative providers available.');
+      activeRequests.delete(context.requestId);
+      continue;
+    }
+
+    const newProvider = availableProviders[0]; // Least loaded
+    context.providerId = newProvider.peerId;
+    context.retryCount++;
+    context.startTime = Date.now();
+    context.lastHeartbeat = Date.now();
+
+    console.log(`[relay] ♻️  Reassigning ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
+
+    // Notify consumer about failover
+    const consumer = peers.get(context.consumerId);
+    if (consumer) {
+      send(consumer.socket, {
+        type: 'provider_failover',
+        id: uuidv4(),
+        from: 'relay',
+        timestamp: Date.now(),
+        requestId: context.requestId,
+        newProviderId: newProvider.peerId,
+        newProviderName: newProvider.displayName || 'Unknown',
+        tokensReceived: context.tokensReceived,
+      });
+    }
+
+    // Send request to new provider with conversation context
+    const newProviderPeer = peers.get(newProvider.peerId);
+    if (newProviderPeer) {
+      send(newProviderPeer.socket, {
+        type: 'inference_request',
+        id: uuidv4(),
+        from: context.consumerId,
+        to: newProvider.peerId,
+        timestamp: Date.now(),
+        requestId: context.requestId,
+        prompt: context.prompt,
+        conversationHistory: context.conversationHistory,
+        isFailoverRequest: true,
+        previousTokens: context.tokensReceived,
+      });
+    }
+  }
 }
 
 // ── Message Router ────────────────────────────────────────────────────────────
@@ -189,6 +308,24 @@ function routeMessage(senderPeerId: string, raw: string) {
         }
         return;
       }
+
+      // Track this request for failover (only if not already tracked)
+      if (!activeRequests.has(req.requestId)) {
+        activeRequests.set(req.requestId, {
+          requestId: req.requestId,
+          consumerId: senderPeerId,
+          providerId: req.to,
+          prompt: req.prompt,
+          conversationHistory: req.conversationHistory || [],
+          startTime: Date.now(),
+          tokensReceived: req.previousTokens || 0,
+          status: 'active',
+          retryCount: req.isFailoverRequest ? 1 : 0,
+          lastHeartbeat: Date.now(),
+        });
+        console.log(`[relay] 📝 Tracking request ${req.requestId}: ${senderPeerId} → ${req.to}`);
+      }
+
       // Forward with original sender id
       send(provider.socket, { ...req, from: senderPeerId });
       break;
@@ -207,6 +344,14 @@ function routeMessage(senderPeerId: string, raw: string) {
     case 'inference_stream': {
       const stream = msg as InferenceStreamMessage;
       if (!stream.to) return;
+
+      // Update heartbeat on each stream token
+      const context = activeRequests.get(stream.requestId);
+      if (context) {
+        context.tokensReceived++;
+        context.lastHeartbeat = Date.now();
+      }
+
       const user = peers.get(stream.to);
       if (user) send(user.socket, { ...stream, from: senderPeerId });
       break;
@@ -216,6 +361,18 @@ function routeMessage(senderPeerId: string, raw: string) {
     case 'inference_done': {
       const done = msg as InferenceDoneMessage;
       if (!done.to) return;
+
+      // Mark completed when done
+      const context = activeRequests.get(done.requestId);
+      if (context) {
+        context.status = 'completed';
+        // Clean up after 5 minutes (for debugging/logging)
+        setTimeout(() => {
+          activeRequests.delete(done.requestId);
+          console.log(`[relay] 🧹 Cleaned up completed request ${done.requestId}`);
+        }, FAILOVER_CONFIG.CLEANUP_DELAY_MS);
+      }
+
       const user = peers.get(done.to);
       if (user) send(user.socket, { ...done, from: senderPeerId });
       break;
@@ -337,7 +494,13 @@ wss.on('connection', (socket: WebSocket) => {
   socket.on('close', (code, reason) => {
     if (registeredId) {
       const peer = peers.get(registeredId);
-      console.log(`[relay] Disconnected: ${registeredId} (${peer?.role}) - Code: ${code}, Reason: ${reason.toString()}`);
+      console.log(`[relay] ❌ Disconnected: ${registeredId} (${peer?.role}) - Code: ${code}, Reason: ${reason.toString()}`);
+
+      // Check if this was a provider with active requests
+      if (peer?.deviceInfo.acceptingJobs) {
+        handleProviderFailure(registeredId);
+      }
+
       peers.delete(registeredId);
       // Always broadcast when a peer disconnects (provider list may have changed)
       broadcastProviderList();
@@ -360,5 +523,86 @@ wss.on('listening', () => {
 setInterval(() => {
   const providersCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
   const consumersCount = [...peers.values()].filter((p) => !p.deviceInfo.acceptingJobs).length;
-  console.log(`[relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount}`);
+  console.log(`[relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount} activeRequests=${activeRequests.size}`);
 }, 30_000);
+
+// ── Zombie Detection & Timeout Monitoring ─────────────────────────────────────
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [requestId, context] of activeRequests.entries()) {
+    if (context.status !== 'active') continue;
+
+    const timeSinceHeartbeat = now - context.lastHeartbeat;
+
+    // If no activity for timeout period, assume provider is stuck
+    if (timeSinceHeartbeat > FAILOVER_CONFIG.REQUEST_TIMEOUT_MS) {
+      console.log(`[relay] ⏰ Request ${requestId} timed out (${timeSinceHeartbeat}ms since last token)`);
+      console.log(`[relay] 🔄 Provider ${context.providerId} appears hung, reassigning request`);
+
+      // Treat as provider failure and reassign
+      const provider = peers.get(context.providerId);
+      if (provider) {
+        // Only handle this specific request's failover
+        const failedRequests = [context];
+
+        // Same failover logic but for single request
+        if (context.retryCount >= FAILOVER_CONFIG.MAX_RETRIES) {
+          console.log(`[relay] ❌ Request ${context.requestId} exceeded retry limit`);
+          sendErrorToConsumer(context.consumerId, context.requestId, 'MAX_RETRIES_EXCEEDED', 'Request timed out after maximum retries.');
+          activeRequests.delete(context.requestId);
+          continue;
+        }
+
+        const availableProviders = getProviders().filter(p => p.peerId !== context.providerId);
+
+        if (availableProviders.length === 0) {
+          console.log(`[relay] ❌ No backup providers for timed out request ${context.requestId}`);
+          sendErrorToConsumer(context.consumerId, context.requestId, 'NO_PROVIDERS_AVAILABLE', 'Request timed out and no alternative providers available.');
+          activeRequests.delete(context.requestId);
+          continue;
+        }
+
+        const newProvider = availableProviders[0];
+        context.providerId = newProvider.peerId;
+        context.retryCount++;
+        context.startTime = Date.now();
+        context.lastHeartbeat = Date.now();
+
+        console.log(`[relay] ♻️  Reassigning timed out ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
+
+        // Notify consumer about failover
+        const consumer = peers.get(context.consumerId);
+        if (consumer) {
+          send(consumer.socket, {
+            type: 'provider_failover',
+            id: uuidv4(),
+            from: 'relay',
+            timestamp: Date.now(),
+            requestId: context.requestId,
+            newProviderId: newProvider.peerId,
+            newProviderName: newProvider.displayName || 'Unknown',
+            tokensReceived: context.tokensReceived,
+          });
+        }
+
+        // Send request to new provider
+        const newProviderPeer = peers.get(newProvider.peerId);
+        if (newProviderPeer) {
+          send(newProviderPeer.socket, {
+            type: 'inference_request',
+            id: uuidv4(),
+            from: context.consumerId,
+            to: newProvider.peerId,
+            timestamp: Date.now(),
+            requestId: context.requestId,
+            prompt: context.prompt,
+            conversationHistory: context.conversationHistory,
+            isFailoverRequest: true,
+            previousTokens: context.tokensReceived,
+          });
+        }
+      }
+    }
+  }
+}, FAILOVER_CONFIG.HEALTH_CHECK_INTERVAL_MS);

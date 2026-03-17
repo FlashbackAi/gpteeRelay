@@ -11,6 +11,8 @@ export type MessageType =
   | 'error'
   | 'ping'
   | 'pong'
+  | 'provider_failover'  // relay → user (provider switched)
+  | 'inference_error'    // relay → user (inference failed)
   | 'webrtc_offer'       // WebRTC signaling: offer
   | 'webrtc_answer'      // WebRTC signaling: answer
   | 'webrtc_ice_candidate'; // WebRTC signaling: ICE candidate
@@ -57,11 +59,25 @@ export interface ProviderStatusMessage extends BaseMessage {
   };
 }
 
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+  streaming?: boolean;
+  tokensGenerated?: number;
+  durationMs?: number;
+  fulfilledBy?: string;
+}
+
 export interface InferenceRequestMessage extends BaseMessage {
   type: 'inference_request';
   to: string;          // provider peer id
   requestId: string;   // used to match response
   prompt: string;
+  conversationHistory?: ChatMessage[]; // Full chat context for failover
+  isFailoverRequest?: boolean; // Mark as failover request
+  previousTokens?: number; // Tokens already generated (for failover)
   params?: {
     maxTokens?: number;
     temperature?: number;
@@ -129,6 +145,21 @@ export interface WebRTCIceCandidateMessage extends BaseMessage {
   sdpMLineIndex: number | null;
 }
 
+export interface ProviderFailoverMessage extends BaseMessage {
+  type: 'provider_failover';
+  requestId: string;
+  newProviderId: string;
+  newProviderName: string;
+  tokensReceived: number;
+}
+
+export interface InferenceErrorMessage extends BaseMessage {
+  type: 'inference_error';
+  requestId: string;
+  code: string;
+  message: string;
+}
+
 export type GPTeeMessage =
   | RegisterMessage
   | ProviderListMessage
@@ -140,6 +171,8 @@ export type GPTeeMessage =
   | ErrorMessage
   | PingMessage
   | PongMessage
+  | ProviderFailoverMessage
+  | InferenceErrorMessage
   | WebRTCOfferMessage
   | WebRTCAnswerMessage
   | WebRTCIceCandidateMessage;
