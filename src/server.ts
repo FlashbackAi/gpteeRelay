@@ -12,9 +12,28 @@ import {
   WebRTCOfferMessage,
   WebRTCAnswerMessage,
   WebRTCIceCandidateMessage,
+  WorkerRegisterMessage,
+  WorkerRegisteredMessage,
+  WorkerDeregisterMessage,
+  WorkerHeartbeatMessage,
+  WorkerStatusMessage,
+  TaskAcceptMessage,
+  TaskRejectMessage,
+  TaskResultMessage,
+  TaskErrorMessage,
+  WorkerPauseMessage,
+  WorkerResumeMessage,
 } from './types';
+import { ImageAnalysisCoordinator } from './ImageAnalysisCoordinator';
+import { getTaskCreatorService } from './services/TaskCreatorService';
 
 const PORT = parseInt(process.env.PORT || '9293', 10);
+
+// ── Image Analysis Coordinator ────────────────────────────────────────────────
+const imageCoordinator = new ImageAnalysisCoordinator();
+
+// ── Task Creator Service ──────────────────────────────────────────────────────
+const taskCreatorService = getTaskCreatorService(imageCoordinator);
 
 // ── Peer Registry ─────────────────────────────────────────────────────────────
 interface ProviderMetrics {
@@ -418,6 +437,70 @@ function routeMessage(senderPeerId: string, raw: string) {
       break;
     }
 
+    // ── Image Analysis Worker Protocol ────────────────────────────────────────
+    case 'worker_register': {
+      const reg = msg as WorkerRegisterMessage;
+      const sender = peers.get(senderPeerId);
+      if (sender) {
+        imageCoordinator.registerWorker(sender.socket, reg);
+      }
+      break;
+    }
+
+    case 'worker_deregister': {
+      const dereg = msg as WorkerDeregisterMessage;
+      imageCoordinator.deregisterWorker(dereg.workerId);
+      break;
+    }
+
+    case 'worker_heartbeat': {
+      const heartbeat = msg as WorkerHeartbeatMessage;
+      imageCoordinator.updateWorkerHeartbeat(heartbeat);
+      break;
+    }
+
+    case 'worker_status': {
+      const status = msg as WorkerStatusMessage;
+      imageCoordinator.updateWorkerStatus(status);
+      break;
+    }
+
+    case 'task_accept': {
+      const accept = msg as TaskAcceptMessage;
+      imageCoordinator.handleTaskAccept(accept);
+      break;
+    }
+
+    case 'task_reject': {
+      const reject = msg as TaskRejectMessage;
+      imageCoordinator.handleTaskReject(reject);
+      break;
+    }
+
+    case 'task_result': {
+      const result = msg as TaskResultMessage;
+      imageCoordinator.handleTaskResult(result);
+      break;
+    }
+
+    case 'task_error': {
+      const error = msg as TaskErrorMessage;
+      imageCoordinator.handleTaskError(error);
+      break;
+    }
+
+    case 'worker_pause': {
+      const pause = msg as WorkerPauseMessage;
+      imageCoordinator.pauseWorker(pause);
+      break;
+    }
+
+    case 'worker_resume': {
+      const resume = msg as WorkerResumeMessage;
+      imageCoordinator.resumeWorker(resume);
+      break;
+    }
+
     default:
       console.warn(`[relay] Unhandled message type: ${msg.type}`);
   }
@@ -441,7 +524,7 @@ wss.on('connection', (socket: WebSocket) => {
     }
   }, 10_000);
 
-  socket.on('message', (data: Buffer) => {
+  socket.on('message', async (data: Buffer) => {
     const raw = data.toString();
 
     // Handle registration separately (before peer is in registry)
@@ -454,8 +537,31 @@ wss.on('connection', (socket: WebSocket) => {
         return;
       }
 
-      if (msg.type !== 'register') {
-        console.warn(`[relay] Expected register, got ${msg.type}`);
+      if (msg.type !== 'register' && msg.type !== 'worker_register') {
+        console.warn(`[relay] Expected register or worker_register, got ${msg.type}`);
+        return;
+      }
+
+      // Handle both peer registration and worker registration
+      if (msg.type === 'worker_register') {
+        const workerReg = msg as WorkerRegisterMessage;
+        registeredId = workerReg.workerId || uuidv4();
+
+        // Register worker in image analysis coordinator
+        await imageCoordinator.registerWorker(socket, workerReg);
+
+        console.log(`[relay] ✅ Worker registered: ${registeredId} (${workerReg.workerInfo.deviceName})`);
+
+        // Send acknowledgment
+        const ackMsg: WorkerRegisteredMessage = {
+          type: 'worker_registered',
+          id: uuidv4(),
+          from: 'relay',
+          timestamp: Date.now(),
+          workerId: registeredId,
+        };
+        send(socket, ackMsg);
+
         return;
       }
 
@@ -514,9 +620,24 @@ wss.on('connection', (socket: WebSocket) => {
   });
 });
 
-wss.on('listening', () => {
+wss.on('listening', async () => {
   console.log(`✅  GPTee Relay Server running on ws://0.0.0.0:${PORT}`);
   console.log(`    Peers connected: ${peers.size}`);
+
+  // Start automatic task creation from S3
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  AUTOMATIC TASK CREATION ENABLED');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  The coordinator will automatically:');
+  console.log('  • Scan S3 bucket for images every 10 minutes');
+  console.log('  • Create tasks for unprocessed images');
+  console.log('  • Distribute tasks to available workers');
+  console.log('  • Track results in DynamoDB');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
+
+  await taskCreatorService.start();
 });
 
 // ── Health check every 30s ────────────────────────────────────────────────────

@@ -15,7 +15,22 @@ export type MessageType =
   | 'inference_error'    // relay → user (inference failed)
   | 'webrtc_offer'       // WebRTC signaling: offer
   | 'webrtc_answer'      // WebRTC signaling: answer
-  | 'webrtc_ice_candidate'; // WebRTC signaling: ICE candidate
+  | 'webrtc_ice_candidate' // WebRTC signaling: ICE candidate
+  // Image Analysis Worker Protocol
+  | 'worker_register'           // Worker announces capabilities
+  | 'worker_registered'         // Coordinator → Worker: registration confirmed
+  | 'worker_deregister'         // Worker going offline
+  | 'worker_status'             // Periodic health metrics
+  | 'worker_heartbeat'          // Lightweight keepalive (every 30s)
+  | 'task_assign'               // Coordinator → Worker: analyze this image
+  | 'task_accept'               // Worker → Coordinator: task accepted
+  | 'task_reject'               // Worker → Coordinator: cannot accept
+  | 'task_result'               // Worker → Coordinator: analysis complete
+  | 'task_error'                // Worker → Coordinator: task failed
+  | 'worker_pause'              // Worker → Coordinator: pausing work
+  | 'worker_resume'             // Worker → Coordinator: resuming work
+  | 'coordinator_pause_worker'  // Coordinator → Worker: please pause
+  | 'coordinator_resume_worker';// Coordinator → Worker: resume work
 
 export interface BaseMessage {
   type: MessageType;
@@ -160,6 +175,155 @@ export interface InferenceErrorMessage extends BaseMessage {
   message: string;
 }
 
+// ── Image Analysis Worker Protocol ───────────────────────────────────────────
+
+export type ThermalStatus = 'nominal' | 'light' | 'moderate' | 'severe' | 'critical';
+
+export interface WorkerRegisterMessage extends BaseMessage {
+  type: 'worker_register';
+  workerId: string;
+  workerInfo: {
+    deviceName: string;
+    deviceModel: string;
+    platform: 'android' | 'ios';
+    osVersion: string;
+    chipVendor: 'qualcomm' | 'mediatek' | 'samsung' | 'apple';
+    thermalStatus: ThermalStatus;
+    batteryLevel: number;
+    networkType: 'wifi' | 'cellular';
+    modelsLoaded: {
+      face_detection: boolean;
+      object_detection?: boolean;
+    };
+    hardwareAcceleration: Array<'qnn' | 'nnapi' | 'coreml' | 'cpu'>;
+    maxConcurrentTasks: number;
+    maxImageResolution: number;
+  };
+}
+
+export interface WorkerRegisteredMessage extends BaseMessage {
+  type: 'worker_registered';
+  workerId: string;
+}
+
+export interface WorkerDeregisterMessage extends BaseMessage {
+  type: 'worker_deregister';
+  workerId: string;
+}
+
+export interface WorkerHeartbeatMessage extends BaseMessage {
+  type: 'worker_heartbeat';
+  workerId: string;
+  thermalStatus: ThermalStatus;
+  batteryLevel: number;
+  activeTasks: number;
+}
+
+export interface TaskAssignMessage extends BaseMessage {
+  type: 'task_assign';
+  to: string;
+  taskId: string;
+  imageId: string;
+  imageName: string;
+  imageUrl: string;
+  analysisType: 'face_detection' | 'object_detection' | 'classification';
+  priority: 'low' | 'normal' | 'high';
+  timeout: number;
+  modelHints?: {
+    preferredDetector?: string;
+    minConfidence?: number;
+    maxDetections?: number;
+  };
+}
+
+export interface TaskAcceptMessage extends BaseMessage {
+  type: 'task_accept';
+  taskId: string;
+  workerId: string;
+  estimatedCompletionMs: number;
+}
+
+export interface TaskRejectMessage extends BaseMessage {
+  type: 'task_reject';
+  taskId: string;
+  workerId: string;
+  reason: 'overloaded' | 'low_battery' | 'thermal_warning' | 'model_not_loaded' | 'network_poor';
+  retryAfterMs?: number;
+}
+
+export interface TaskResultMessage extends BaseMessage {
+  type: 'task_result';
+  taskId: string;
+  imageId: string;
+  imageName: string;
+  analysisType: string;
+  detectionsFound: number;
+  detections: Array<{
+    detectionId: string;
+    bbox: { x: number; y: number; width: number; height: number };
+    confidence: number;
+    attributes: Record<string, any>;
+  }>;
+  processingTimeMs: number;
+  thermalStatus: ThermalStatus;
+  hardwareAccelerator: string;
+  modelVersions: Record<string, string>;
+  imageQuality?: {
+    resolution: { width: number; height: number };
+    blurScore?: number;
+    brightness?: number;
+  };
+}
+
+export interface TaskErrorMessage extends BaseMessage {
+  type: 'task_error';
+  taskId: string;
+  workerId: string;
+  errorCode: 'MODEL_ERROR' | 'DOWNLOAD_FAILED' | 'OUT_OF_MEMORY' | 'TIMEOUT' | 'INVALID_IMAGE';
+  errorMessage: string;
+  retryable: boolean;
+}
+
+export interface WorkerStatusMessage extends BaseMessage {
+  type: 'worker_status';
+  workerId: string;
+  thermalStatus: ThermalStatus;
+  batteryLevel: number;
+  cpuUsagePercent: number;
+  memoryUsageMb: number;
+  networkType: 'wifi' | 'cellular' | 'ethernet';
+  networkQuality: 'excellent' | 'good' | 'fair' | 'poor';
+  activeTasks: number;
+  tasksCompleted: number;
+  tasksFailed: number;
+  avgProcessingTimeMs: number;
+  uptimeMs: number;
+  availableForWork: boolean;
+  maxConcurrentTasks: number;
+}
+
+export interface WorkerPauseMessage extends BaseMessage {
+  type: 'worker_pause';
+  workerId: string;
+  reason: 'thermal' | 'battery' | 'manual';
+}
+
+export interface WorkerResumeMessage extends BaseMessage {
+  type: 'worker_resume';
+  workerId: string;
+}
+
+export interface CoordinatorPauseWorkerMessage extends BaseMessage {
+  type: 'coordinator_pause_worker';
+  to: string;
+  reason: string;
+}
+
+export interface CoordinatorResumeWorkerMessage extends BaseMessage {
+  type: 'coordinator_resume_worker';
+  to: string;
+}
+
 export type GPTeeMessage =
   | RegisterMessage
   | ProviderListMessage
@@ -175,4 +339,19 @@ export type GPTeeMessage =
   | InferenceErrorMessage
   | WebRTCOfferMessage
   | WebRTCAnswerMessage
-  | WebRTCIceCandidateMessage;
+  | WebRTCIceCandidateMessage
+  // Image Analysis Worker Messages
+  | WorkerRegisterMessage
+  | WorkerRegisteredMessage
+  | WorkerDeregisterMessage
+  | WorkerHeartbeatMessage
+  | TaskAssignMessage
+  | TaskAcceptMessage
+  | TaskRejectMessage
+  | TaskResultMessage
+  | TaskErrorMessage
+  | WorkerStatusMessage
+  | WorkerPauseMessage
+  | WorkerResumeMessage
+  | CoordinatorPauseWorkerMessage
+  | CoordinatorResumeWorkerMessage;
