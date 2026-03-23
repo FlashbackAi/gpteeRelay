@@ -14,7 +14,7 @@ export class TaskCreatorService {
   private dynamoDBService = getDynamoDBService();
 
   private pollingInterval?: NodeJS.Timeout;
-  private readonly POLLING_INTERVAL_MS = 200_000; // Poll every 2 minutes
+  private readonly POLLING_INTERVAL_MS = 120_000; // Poll every 2 minutes (120 seconds)
   private readonly BATCH_SIZE = 20; // Process 20 images per poll
 
   constructor(coordinator: ImageAnalysisCoordinator) {
