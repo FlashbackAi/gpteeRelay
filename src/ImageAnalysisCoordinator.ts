@@ -104,6 +104,64 @@ export class ImageAnalysisCoordinator {
   constructor() {
     console.log('[ImageCoordinator] Initializing Image Analysis Coordinator');
     this.startHeartbeatMonitoring();
+    this.loadPendingTasksFromDB();
+  }
+
+  /**
+   * Load pending tasks from DynamoDB into the task queue
+   * Called on initialization and can be called periodically
+   */
+  private async loadPendingTasksFromDB(): Promise<void> {
+    try {
+      console.log('[ImageCoordinator] 🔄 Loading pending tasks from DynamoDB...');
+      const pendingTasks = await this.dynamoDBService.getPendingTasks(100);
+
+      if (pendingTasks.length === 0) {
+        console.log('[ImageCoordinator] No pending tasks found in DynamoDB');
+        return;
+      }
+
+      console.log(`[ImageCoordinator] Found ${pendingTasks.length} pending tasks in DynamoDB`);
+
+      // Load each pending task into the coordinator's task queue
+      for (const dbTask of pendingTasks) {
+        // Check if task is already in queue or active
+        const alreadyQueued = this.taskQueue.find(t => t.imageId === dbTask.imageId);
+        const alreadyActive = Array.from(this.activeTasks.values()).find(t => t.imageId === dbTask.imageId);
+
+        if (alreadyQueued || alreadyActive) {
+          continue; // Skip duplicates
+        }
+
+        // Generate presigned URL for the image
+        const s3Service = require('./services/S3Service').getS3Service();
+        const imageUrl = await s3Service.generatePresignedUrl(dbTask.s3Key, 3600);
+
+        // Create task object for coordinator
+        const task: Task = {
+          taskId: dbTask.imageId, // Use imageId as taskId for consistency
+          imageId: dbTask.imageId,
+          imageName: dbTask.imageName,
+          imageUrl: imageUrl,
+          analysisType: 'face_detection',
+          priority: dbTask.priority || 'normal',
+          timeout: this.DEFAULT_TASK_TIMEOUT_MS,
+          status: 'pending',
+          retryCount: dbTask.attemptCount || 0,
+          maxRetries: this.MAX_RETRIES,
+        };
+
+        this.taskQueue.push(task);
+      }
+
+      this.sortTaskQueue();
+      console.log(`[ImageCoordinator] ✅ Loaded ${this.taskQueue.length} pending tasks into queue`);
+
+      // Try to assign them immediately
+      await this.assignPendingTasks();
+    } catch (error: any) {
+      console.error('[ImageCoordinator] ❌ Failed to load pending tasks from DynamoDB:', error.message);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -142,6 +200,9 @@ export class ImageAnalysisCoordinator {
     };
 
     this.workers.set(workerId, worker);
+
+    // Load any pending tasks from DynamoDB that aren't in queue yet
+    await this.loadPendingTasksFromDB();
 
     // Try to assign pending tasks
     await this.assignPendingTasks();
@@ -229,10 +290,14 @@ export class ImageAnalysisCoordinator {
   ): Promise<string> {
     const taskId = uuidv4();
 
+    // Extract clean filename from URL (remove query parameters)
+    const urlPath = imageUrl.split('?')[0]; // Remove query string
+    const imageName = urlPath.split('/').pop() || 'unknown';
+
     const task: Task = {
       taskId,
       imageId,
-      imageName: imageUrl.split('/').pop() || 'unknown',
+      imageName,
       imageUrl,
       analysisType,
       priority,
