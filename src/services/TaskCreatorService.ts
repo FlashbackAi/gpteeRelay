@@ -68,11 +68,11 @@ export class TaskCreatorService {
       let newTasksCreated = 0;
       let alreadyProcessed = 0;
       let alreadyPending = 0;
+      let scannedCount = 0;
 
-      // Process images in batches to avoid overwhelming the system
-      const batch = images.slice(0, this.BATCH_SIZE);
-
-      for (const image of batch) {
+      // Process images until we create BATCH_SIZE tasks or run out of images
+      for (const image of images) {
+        scannedCount++;
         const imageId = this.generateImageId(image.key);
 
         // Check if task already exists in DynamoDB
@@ -106,6 +106,11 @@ export class TaskCreatorService {
 
         console.log(`[TaskCreator] ✅ Created task ${taskId} for image: ${image.key}`);
         newTasksCreated++;
+
+        // Stop after creating BATCH_SIZE new tasks
+        if (newTasksCreated >= this.BATCH_SIZE) {
+          break;
+        }
       }
 
       // Log summary
@@ -114,7 +119,7 @@ export class TaskCreatorService {
           newTasks: newTasksCreated,
           alreadyProcessed,
           alreadyPending,
-          totalScanned: batch.length,
+          totalScanned: scannedCount,
         });
       }
 
