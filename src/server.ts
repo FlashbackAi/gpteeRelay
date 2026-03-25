@@ -1,3 +1,6 @@
+import express from 'express';
+import http from 'http';
+import apiRouter from './api/routes';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -506,8 +509,15 @@ function routeMessage(senderPeerId: string, raw: string) {
   }
 }
 
-// ── WebSocket Server ──────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ port: PORT });
+// ── HTTP & WebSocket Server ───────────────────────────────────────────────────
+const app = express();
+app.use(express.json());
+
+// API Routes
+app.use('/api', apiRouter);
+
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
 wss.on('connection', (socket: WebSocket) => {
   // Assign a temporary peer id — replaced when peer registers
@@ -620,8 +630,8 @@ wss.on('connection', (socket: WebSocket) => {
   });
 });
 
-wss.on('listening', async () => {
-  console.log(`✅  GPTee Relay Server running on ws://0.0.0.0:${PORT}`);
+server.listen(PORT, async () => {
+  console.log(`✅  GPTee Relay Server running on http/ws://0.0.0.0:${PORT}`);
   console.log(`    Peers connected: ${peers.size}`);
 
   // Start automatic task creation from S3

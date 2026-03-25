@@ -8,20 +8,23 @@ export const AWS_CONFIG = {
   /**
    * AWS Region
    */
-  region: process.env.AWS_REGION || 'ap-south-1',
+  region: process.env.AWS_REGION || 'us-east-1',
 
   /**
    * S3 Bucket for image storage
    */
   s3: {
-    bucket: 'gpteeimageanalysis',
+    bucket: 'gptee-image-analysis',
   },
 
   /**
    * DynamoDB Tables
    */
   dynamodb: {
-    tasksTable: 'image-analysis-tasks',
-    resultsTable: 'image-analysis-results',
+    tasksTable: 'image-analysis-tasks_v1',
+    resultsTable: 'image-analysis-results_v1',
+    nodeIdentitiesTable: 'node_identifier_v1',
+    nodesTable: 'nodes_v1',
+    walletChallengesTable: 'wallet_challenges_v1',
   },
 };
