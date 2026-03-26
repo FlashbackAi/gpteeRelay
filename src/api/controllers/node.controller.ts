@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { NodeService } from '../services/node.service';
 import { NodeSettingsUpdate } from '../models/nodeSettings.model';
+import logger from '../../utils/logger';
 
 export class NodeController {
 
@@ -11,9 +12,10 @@ export class NodeController {
                 return res.status(400).json({ error: 'bad_request', message: 'node_id is required' });
             }
             const settings = await NodeService.getNodeSettings(node_id);
+            logger.info(`[Node] Settings retrieved for node: ${node_id}`);
             return res.json(settings);
         } catch (err: any) {
-            console.error('[NodeController] getSettings error', err);
+            logger.error(`[Node] getSettings error: ${err.message}`, { stack: err.stack });
             if (err.code === 'NODE_NOT_FOUND') {
                 return res.status(404).json({ error: 'not_found', message: 'node not found' });
             }
@@ -60,9 +62,10 @@ export class NodeController {
             }
 
             const updated = await NodeService.updateNodeSettings(node_id, fields);
+            logger.info(`[Node] Settings updated for node: ${node_id}`, { fields: Object.keys(fields) });
             return res.json(updated);
         } catch (err: any) {
-            console.error('[NodeController] updateSettings error', err);
+            logger.error(`[Node] updateSettings error: ${err.message}`, { stack: err.stack });
             if (err.code === 'NODE_NOT_FOUND') {
                 return res.status(404).json({ error: 'not_found', message: 'node not found' });
             }

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { StatsService } from '../services/stats.service';
 import { NodeStatisticsUpdate } from '../models/nodeStatistics.model';
+import logger from '../../utils/logger';
 
 export class StatsController {
     static async getStats(req: Request, res: Response) {
@@ -19,9 +20,10 @@ export class StatsController {
                 return res.status(400).json({ error: 'bad_request', message: 'node_id is required' });
             }
             const stats = await StatsService.getNodeStats(node_id);
+            logger.info(`[Stats] Statistics retrieved for node: ${node_id}`);
             return res.json(stats);
         } catch (err: any) {
-            console.error('[StatsController] getNodeStats error', err);
+            logger.error(`[Stats] getNodeStats error: ${err.message}`, { stack: err.stack });
             if (err.code === 'NODE_NOT_FOUND') {
                 return res.status(404).json({ error: 'not_found', message: 'node not found' });
             }
@@ -73,9 +75,10 @@ export class StatsController {
             }
 
             const updated = await StatsService.updateNodeStats(node_id, fields);
+            logger.info(`[Stats] Statistics updated for node: ${node_id}`, { fields: Object.keys(fields) });
             return res.json(updated);
         } catch (err: any) {
-            console.error('[StatsController] updateNodeStats error', err);
+            logger.error(`[Stats] updateNodeStats error: ${err.message}`, { stack: err.stack });
             if (err.code === 'NODE_NOT_FOUND') {
                 return res.status(404).json({ error: 'not_found', message: 'node not found' });
             }

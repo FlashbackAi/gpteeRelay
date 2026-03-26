@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { AuthService } from '../services/auth.service';
+import logger from '../../utils/logger';
 
 const REFRESH_DAYS = 7;
 
@@ -20,9 +21,10 @@ export class AuthController {
                 platform
             );
 
+            logger.info(`[Auth] Solana challenge created for address: ${address} on platform: ${platform}`);
             return res.json({ message });
         } catch (err: any) {
-            console.error('[SolanaAuth] createSolanaChallenge error', err);
+            logger.error(`[Auth] createSolanaChallenge error: ${err.message}`, { stack: err.stack });
 
             if (err.code === 'ADDRESS_REQUIRED') {
                 return res
@@ -67,6 +69,7 @@ export class AuthController {
                 });
             }
 
+            logger.info(`[Auth] Solana node verified: ${result.node_id} on platform: ${platform}`);
             return res.json({
                 ok: true,
                 node_id: result.node_id,
@@ -74,7 +77,7 @@ export class AuthController {
                 refreshToken: result.refreshToken,
             });
         } catch (err: any) {
-            console.error('[SolanaAuth] verifySolanaNode error', err);
+            logger.error(`[Auth] verifySolanaNode error: ${err.message}`, { stack: err.stack });
 
             switch (err.code) {
                 case 'BAD_REQUEST':
@@ -105,10 +108,11 @@ export class AuthController {
             }
 
             const result = await AuthService.checkNodeIdentity({ address, provider: 'solana' });
+            logger.info(`[Auth] Check Solana node: ${address} - Exists: ${result.exists}`);
             return res.json(result);
 
         } catch (err: any) {
-            console.error('[SolanaAuth] checkSolanaNode error', err);
+            logger.error(`[Auth] checkSolanaNode error: ${err.message}`, { stack: err.stack });
             return res.status(500).json({ error: 'server_error' });
         }
     }
@@ -143,6 +147,7 @@ export class AuthController {
                     path: '/',
                 });
 
+                logger.info(`[Auth] New Solana node created: ${result.node_id} (web)`);
                 return res.json({
                     ok: true,
                     node_id: result.node_id,
@@ -150,6 +155,7 @@ export class AuthController {
                 });
             }
 
+            logger.info(`[Auth] New Solana node created: ${result.node_id} (${platform})`);
             return res.json({
                 ok: true,
                 node_id: result.node_id,
@@ -158,7 +164,7 @@ export class AuthController {
             });
 
         } catch (err: any) {
-            console.error('[SolanaAuth] createSolanaNode error', err);
+            logger.error(`[Auth] createSolanaNode error: ${err.message}`, { stack: err.stack });
 
             switch (err.code) {
                 case 'BAD_REQUEST':

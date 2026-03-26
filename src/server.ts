@@ -29,6 +29,7 @@ import {
 } from './types';
 import { ImageAnalysisCoordinator } from './ImageAnalysisCoordinator';
 import { getTaskCreatorService } from './services/TaskCreatorService';
+import logger from './utils/logger';
 
 const PORT = parseInt(process.env.PORT || '9293', 10);
 
@@ -103,10 +104,10 @@ function calculateLoad(metrics?: ProviderMetrics): number {
 
 function broadcastProviderList() {
   const providerList: ProviderInfo[] = [];
-
-  console.log(`[relay] 📋 Building provider list from ${peers.size} peers:`);
+  
+  logger.info(`[Relay] Building provider list from ${peers.size} peers`);
   peers.forEach((peer) => {
-    console.log(`[relay]   - ${peer.peerId.substring(0, 8)}: ${peer.deviceInfo.displayName} (accepting: ${peer.deviceInfo.acceptingJobs})`);
+    logger.debug(`[Relay] Peer: ${peer.peerId.substring(0, 8)} - ${peer.deviceInfo.displayName} (accepting: ${peer.deviceInfo.acceptingJobs})`);
 
     // A peer is an available provider if they are accepting jobs
     if (peer.deviceInfo.acceptingJobs) {
@@ -119,9 +120,9 @@ function broadcastProviderList() {
     }
   });
 
-  console.log(`[relay] 📤 Broadcasting ${providerList.length} providers to ${peers.size} peers`);
+  logger.info(`[Relay] Broadcasting ${providerList.length} providers to ${peers.size} peers`);
   providerList.forEach((p, i) => {
-    console.log(`[relay]   ${i + 1}. ${p.displayName} (${p.peerId.substring(0, 8)}...)`);
+    logger.debug(`[Relay] Provider ${i + 1}: ${p.displayName} (${p.peerId.substring(0, 8)})`);
   });
 
   // Sort providers by load (least loaded first) for load balancing
@@ -190,13 +191,13 @@ function handleProviderFailure(failedProviderId: string) {
 
   if (failedRequests.length === 0) return;
 
-  console.log(`[relay] 🔄 Provider ${failedProviderId} failed with ${failedRequests.length} active requests`);
+  logger.warn(`[Relay] Provider ${failedProviderId} failed with ${failedRequests.length} active requests`);
 
   // For each failed request, attempt reassignment
   for (const context of failedRequests) {
     // Skip if already retried too many times
     if (context.retryCount >= FAILOVER_CONFIG.MAX_RETRIES) {
-      console.log(`[relay] ❌ Request ${context.requestId} exceeded retry limit`);
+      logger.error(`[Relay] Request ${context.requestId} exceeded retry limit`);
       sendErrorToConsumer(context.consumerId, context.requestId, 'MAX_RETRIES_EXCEEDED', 'All providers failed. Maximum retry limit reached.');
       activeRequests.delete(context.requestId);
       continue;
@@ -206,7 +207,7 @@ function handleProviderFailure(failedProviderId: string) {
     const availableProviders = getProviders().filter(p => p.peerId !== failedProviderId);
 
     if (availableProviders.length === 0) {
-      console.log(`[relay] ❌ No backup providers for request ${context.requestId}`);
+      logger.error(`[Relay] No backup providers for request ${context.requestId}`);
       sendErrorToConsumer(context.consumerId, context.requestId, 'NO_PROVIDERS_AVAILABLE', 'No alternative providers available.');
       activeRequests.delete(context.requestId);
       continue;
@@ -218,7 +219,7 @@ function handleProviderFailure(failedProviderId: string) {
     context.startTime = Date.now();
     context.lastHeartbeat = Date.now();
 
-    console.log(`[relay] ♻️  Reassigning ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
+    logger.info(`[Relay] Reassigning ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
 
     // Notify consumer about failover
     const consumer = peers.get(context.consumerId);
@@ -260,11 +261,11 @@ function routeMessage(senderPeerId: string, raw: string) {
   try {
     msg = JSON.parse(raw) as GPTeeMessage;
   } catch {
-    console.error(`[relay] Invalid JSON from ${senderPeerId}`);
+    logger.error(`[Relay] Invalid JSON from ${senderPeerId}`);
     return;
   }
 
-  console.log(`[relay] ${msg.type} from ${senderPeerId} → ${msg.to ?? 'relay'}`);
+  logger.debug(`[Relay] ${msg.type} from ${senderPeerId} → ${msg.to ?? 'relay'}`);
 
   switch (msg.type) {
     case 'register': {
@@ -274,7 +275,7 @@ function routeMessage(senderPeerId: string, raw: string) {
       if (peer) {
         peer.role = reg.role;
         peer.deviceInfo = reg.deviceInfo;
-        console.log(`[relay] 🔄 Updated registration: ${senderPeerId} (acceptingJobs: ${reg.deviceInfo.acceptingJobs}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
+        logger.info(`[Relay] Updated registration: ${senderPeerId} (acceptingJobs: ${reg.deviceInfo.acceptingJobs}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
         // Broadcast updated provider list
         broadcastProviderList();
@@ -291,7 +292,7 @@ function routeMessage(senderPeerId: string, raw: string) {
           ...status.metrics,
           lastUpdated: Date.now(),
         };
-        console.log(`[relay] 📊 Updated metrics for ${senderPeerId}: activeJobs=${status.metrics.activeJobs}, queueDepth=${status.metrics.queueDepth}`);
+        logger.debug(`[Relay] Updated metrics for ${senderPeerId}: activeJobs=${status.metrics.activeJobs}, queueDepth=${status.metrics.queueDepth}`);
 
         // Broadcast updated provider list (sorted by new metrics)
         broadcastProviderList();
@@ -345,7 +346,7 @@ function routeMessage(senderPeerId: string, raw: string) {
           retryCount: req.isFailoverRequest ? 1 : 0,
           lastHeartbeat: Date.now(),
         });
-        console.log(`[relay] 📝 Tracking request ${req.requestId}: ${senderPeerId} → ${req.to}`);
+        logger.info(`[Relay] Tracking request ${req.requestId}: ${senderPeerId} → ${req.to}`);
       }
 
       // Forward with original sender id
@@ -391,7 +392,7 @@ function routeMessage(senderPeerId: string, raw: string) {
         // Clean up after 5 minutes (for debugging/logging)
         setTimeout(() => {
           activeRequests.delete(done.requestId);
-          console.log(`[relay] 🧹 Cleaned up completed request ${done.requestId}`);
+          logger.debug(`[Relay] Cleaned up completed request ${done.requestId}`);
         }, FAILOVER_CONFIG.CLEANUP_DELAY_MS);
       }
 
@@ -407,9 +408,9 @@ function routeMessage(senderPeerId: string, raw: string) {
       const target = peers.get(offer.to);
       if (target) {
         send(target.socket, { ...offer, from: senderPeerId });
-        console.log(`[relay] WebRTC offer forwarded: ${senderPeerId} → ${offer.to}`);
+        logger.debug(`[Relay] WebRTC offer forwarded: ${senderPeerId} → ${offer.to}`);
       } else {
-        console.warn(`[relay] WebRTC offer target not found: ${offer.to}`);
+        logger.warn(`[Relay] WebRTC offer target not found: ${offer.to}`);
       }
       break;
     }
@@ -420,9 +421,9 @@ function routeMessage(senderPeerId: string, raw: string) {
       const target = peers.get(answer.to);
       if (target) {
         send(target.socket, { ...answer, from: senderPeerId });
-        console.log(`[relay] WebRTC answer forwarded: ${senderPeerId} → ${answer.to}`);
+        logger.debug(`[Relay] WebRTC answer forwarded: ${senderPeerId} → ${answer.to}`);
       } else {
-        console.warn(`[relay] WebRTC answer target not found: ${answer.to}`);
+        logger.warn(`[Relay] WebRTC answer target not found: ${answer.to}`);
       }
       break;
     }
@@ -433,9 +434,9 @@ function routeMessage(senderPeerId: string, raw: string) {
       const target = peers.get(candidate.to);
       if (target) {
         send(target.socket, { ...candidate, from: senderPeerId });
-        console.log(`[relay] WebRTC ICE candidate forwarded: ${senderPeerId} → ${candidate.to}`);
+        logger.debug(`[Relay] WebRTC ICE candidate forwarded: ${senderPeerId} → ${candidate.to}`);
       } else {
-        console.warn(`[relay] WebRTC ICE candidate target not found: ${candidate.to}`);
+        logger.warn(`[Relay] WebRTC ICE candidate target not found: ${candidate.to}`);
       }
       break;
     }
@@ -505,7 +506,7 @@ function routeMessage(senderPeerId: string, raw: string) {
     }
 
     default:
-      console.warn(`[relay] Unhandled message type: ${msg.type}`);
+      logger.warn(`[Relay] Unhandled message type: ${msg.type}`);
   }
 }
 
@@ -524,12 +525,12 @@ wss.on('connection', (socket: WebSocket) => {
   const tempId = `temp_${uuidv4()}`;
   let registeredId: string | null = null;
 
-  console.log(`[relay] New connection (temp: ${tempId})`);
+  logger.info(`[Relay] New connection (temp: ${tempId})`);
 
   // First message must be a register
   const registrationTimeout = setTimeout(() => {
     if (!registeredId) {
-      console.log(`[relay] ${tempId} did not register in time — closing`);
+      logger.warn(`[Relay] ${tempId} did not register in time — closing`);
       socket.close();
     }
   }, 10_000);
@@ -543,12 +544,12 @@ wss.on('connection', (socket: WebSocket) => {
       try {
         msg = JSON.parse(raw) as GPTeeMessage;
       } catch (err) {
-        console.error(`[relay] ❌ Failed to parse JSON:`, err);
+        logger.error(`[Relay] Failed to parse JSON: ${err}`);
         return;
       }
 
       if (msg.type !== 'register' && msg.type !== 'worker_register') {
-        console.warn(`[relay] Expected register or worker_register, got ${msg.type}`);
+        logger.warn(`[Relay] Expected register or worker_register, got ${msg.type}`);
         return;
       }
 
@@ -560,7 +561,7 @@ wss.on('connection', (socket: WebSocket) => {
         // Register worker in image analysis coordinator
         await imageCoordinator.registerWorker(socket, workerReg);
 
-        console.log(`[relay] ✅ Worker registered: ${registeredId} (${workerReg.workerInfo.deviceName})`);
+        logger.info(`[Relay] Worker registered: ${registeredId} (${workerReg.workerInfo.deviceName})`);
 
         // Send acknowledgment
         const ackMsg: WorkerRegisteredMessage = {
@@ -587,7 +588,7 @@ wss.on('connection', (socket: WebSocket) => {
         connectedAt: Date.now(),
       });
 
-      console.log(`[relay] ✅ Registered: ${registeredId} as ${reg.role} (${reg.deviceInfo.platform}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
+      logger.info(`[Relay] Registered: ${registeredId} as ${reg.role} (${reg.deviceInfo.platform}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
       // Ack registration
       send(socket, {
@@ -610,7 +611,7 @@ wss.on('connection', (socket: WebSocket) => {
   socket.on('close', (code, reason) => {
     if (registeredId) {
       const peer = peers.get(registeredId);
-      console.log(`[relay] ❌ Disconnected: ${registeredId} (${peer?.role}) - Code: ${code}, Reason: ${reason.toString()}`);
+      logger.info(`[Relay] Disconnected: ${registeredId} (${peer?.role}) - Code: ${code}, Reason: ${reason.toString()}`);
 
       // Check if this was a provider with active requests
       if (peer?.deviceInfo.acceptingJobs) {
@@ -621,31 +622,31 @@ wss.on('connection', (socket: WebSocket) => {
       // Always broadcast when a peer disconnects (provider list may have changed)
       broadcastProviderList();
     } else {
-      console.log(`[relay] Disconnected before registration - Code: ${code}`);
+      logger.info(`[Relay] Disconnected before registration - Code: ${code}`);
     }
   });
 
   socket.on('error', (err) => {
-    console.error(`[relay] Socket error (${registeredId ?? tempId}):`, err.message);
+    logger.error(`[Relay] Socket error (${registeredId ?? tempId}): ${err.message}`);
   });
 });
 
 server.listen(PORT, async () => {
-  console.log(`✅  GPTee Relay Server running on http/ws://0.0.0.0:${PORT}`);
-  console.log(`    Peers connected: ${peers.size}`);
+  logger.info(`✅  GPTee Relay Server running on http/ws://0.0.0.0:${PORT}`);
+  logger.info(`    Peers connected: ${peers.size}`);
 
   // Start automatic task creation from S3
-  console.log('');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  AUTOMATIC TASK CREATION ENABLED');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  The coordinator will automatically:');
-  console.log('  • Scan S3 bucket for images every 10 minutes');
-  console.log('  • Create tasks for unprocessed images');
-  console.log('  • Distribute tasks to available workers');
-  console.log('  • Track results in DynamoDB');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('');
+  logger.info('');
+  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  logger.info('  AUTOMATIC TASK CREATION ENABLED');
+  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  logger.info('  The coordinator will automatically:');
+  logger.info('  • Scan S3 bucket for images every 10 minutes');
+  logger.info('  • Create tasks for unprocessed images');
+  logger.info('  • Distribute tasks to available workers');
+  logger.info('  • Track results in DynamoDB');
+  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  logger.info('');
 
   await taskCreatorService.start();
 });
@@ -654,7 +655,7 @@ server.listen(PORT, async () => {
 setInterval(() => {
   const providersCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
   const consumersCount = [...peers.values()].filter((p) => !p.deviceInfo.acceptingJobs).length;
-  console.log(`[relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount} activeRequests=${activeRequests.size}`);
+  logger.info(`[Relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount} activeRequests=${activeRequests.size}`);
 }, 30_000);
 
 // ── Zombie Detection & Timeout Monitoring ─────────────────────────────────────
@@ -668,8 +669,8 @@ setInterval(() => {
 
     // If no activity for timeout period, assume provider is stuck
     if (timeSinceHeartbeat > FAILOVER_CONFIG.REQUEST_TIMEOUT_MS) {
-      console.log(`[relay] ⏰ Request ${requestId} timed out (${timeSinceHeartbeat}ms since last token)`);
-      console.log(`[relay] 🔄 Provider ${context.providerId} appears hung, reassigning request`);
+      logger.warn(`[Relay] ⏰ Request ${requestId} timed out (${timeSinceHeartbeat}ms since last token)`);
+      logger.warn(`[Relay] 🔄 Provider ${context.providerId} appears hung, reassigning request`);
 
       // Treat as provider failure and reassign
       const provider = peers.get(context.providerId);
@@ -679,7 +680,7 @@ setInterval(() => {
 
         // Same failover logic but for single request
         if (context.retryCount >= FAILOVER_CONFIG.MAX_RETRIES) {
-          console.log(`[relay] ❌ Request ${context.requestId} exceeded retry limit`);
+          logger.error(`[Relay] Request ${context.requestId} exceeded retry limit`);
           sendErrorToConsumer(context.consumerId, context.requestId, 'MAX_RETRIES_EXCEEDED', 'Request timed out after maximum retries.');
           activeRequests.delete(context.requestId);
           continue;
@@ -688,7 +689,7 @@ setInterval(() => {
         const availableProviders = getProviders().filter(p => p.peerId !== context.providerId);
 
         if (availableProviders.length === 0) {
-          console.log(`[relay] ❌ No backup providers for timed out request ${context.requestId}`);
+          logger.error(`[Relay] No backup providers for timed out request ${context.requestId}`);
           sendErrorToConsumer(context.consumerId, context.requestId, 'NO_PROVIDERS_AVAILABLE', 'Request timed out and no alternative providers available.');
           activeRequests.delete(context.requestId);
           continue;
@@ -700,7 +701,7 @@ setInterval(() => {
         context.startTime = Date.now();
         context.lastHeartbeat = Date.now();
 
-        console.log(`[relay] ♻️  Reassigning timed out ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
+        logger.info(`[Relay] Reassigning timed out ${context.requestId} to ${newProvider.peerId} (attempt ${context.retryCount})`);
 
         // Notify consumer about failover
         const consumer = peers.get(context.consumerId);
