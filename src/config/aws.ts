@@ -26,6 +26,7 @@ export const AWS_CONFIG = {
     nodeIdentitiesTable: 'node_identifier_v1',
     nodesTable: 'nodes_v1',
     nodeSettingsTable: 'node_settings_v1',
+    nodeStatisticsTable: 'node_statistics_v1',
     walletChallengesTable: 'wallet_challenges_v1',
   },
 };
