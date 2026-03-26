@@ -1,6 +1,6 @@
 import { docClient } from './dbClient';
 import { AWS_CONFIG } from '../../config/aws';
-import { PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 
 const TABLE_NAME = AWS_CONFIG.dynamodb.nodesTable;
 
@@ -37,4 +37,5 @@ export class NodesModel {
         }));
         return res.Item || null;
     }
+
 }

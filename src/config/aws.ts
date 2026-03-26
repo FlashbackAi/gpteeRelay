@@ -25,6 +25,7 @@ export const AWS_CONFIG = {
     resultsTable: 'image-analysis-results_v1',
     nodeIdentitiesTable: 'node_identifier_v1',
     nodesTable: 'nodes_v1',
+    nodeSettingsTable: 'node_settings_v1',
     walletChallengesTable: 'wallet_challenges_v1',
   },
 };
