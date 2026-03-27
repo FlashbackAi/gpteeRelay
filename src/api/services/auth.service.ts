@@ -157,18 +157,23 @@ export class AuthService {
         const node_id = existingIdentity.node_id;
         await NodeIdentitiesModel.touchIdentity(addr, SOLANA_PROVIDER);
 
-        // 5) Single-use: delete challenge
+        // 5) Fetch node details to get the name
+        const node = await NodesModel.getNode(node_id);
+        const nodeName = node?.name || null;
+
+        // 6) Single-use: delete challenge
         await WalletChallengesModel.deleteChallenge({
             address: addr,
             chain_type: 'solana',
         });
 
-        // 6) Issue tokens
+        // 7) Issue tokens
         const accessToken = `mock-access-token-${node_id}-${Date.now()}`;
         const refreshToken = `mock-refresh-token-${node_id}-${Date.now()}`;
 
         return {
             node_id,
+            name: nodeName, // Include the node name
             accessToken,
             refreshToken,
             platform
