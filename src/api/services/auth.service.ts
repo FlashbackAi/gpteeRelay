@@ -69,7 +69,12 @@ export class AuthService {
         const existing = await NodeIdentitiesModel.getIdentity(identifier, provider);
         if (existing) {
             await NodeIdentitiesModel.touchIdentity(identifier, provider);
-            return { exists: true, node_id: existing.node_id };
+
+            // Fetch node details to get the name
+            const node = await NodesModel.getNode(existing.node_id);
+            const nodeName = node?.name || null;
+
+            return { exists: true, node_id: existing.node_id, name: nodeName };
         }
         return {
             exists: false
