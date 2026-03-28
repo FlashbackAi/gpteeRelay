@@ -35,14 +35,28 @@ export class StatsController {
         try {
             const {
                 node_id,
-                served_requests,
-                tokens_generated,
-                self_requests,
-                session_uptime,
-                peak_t_s,
-                avg_t_s,
-                low_t_s,
-                response_avg_time,
+                // Provider mode stats
+                pro_mode_requests_served,
+                pro_mode_tokens_generated,
+                pro_mode_self_requests,
+                pro_mode_peak_t_s,
+                pro_mode_avg_t_s,
+                pro_mode_low_t_s,
+                pro_mode_response_avg_time,
+                pro_mode_session_uptime,
+                pro_mode_total_uptime,
+                pro_mode_session_start_time,
+                // Worker mode stats
+                work_mode_tasks_processed,
+                work_mode_tasks_failed,
+                work_mode_total_detections,
+                work_mode_avg_processing_time,
+                work_mode_session_uptime,
+                work_mode_total_uptime,
+                work_mode_session_start_time,
+                // Node-level stats
+                node_total_uptime,
+                node_last_active_time,
             } = req.body || {};
 
             if (!node_id) {
@@ -58,14 +72,28 @@ export class StatsController {
                 }
             };
 
-            addField('served_requests', served_requests);
-            addField('tokens_generated', tokens_generated);
-            addField('self_requests', self_requests);
-            addField('session_uptime', session_uptime);
-            addField('peak_t_s', peak_t_s);
-            addField('avg_t_s', avg_t_s);
-            addField('low_t_s', low_t_s);
-            addField('response_avg_time', response_avg_time);
+            // Provider mode stats
+            addField('pro_mode_requests_served', pro_mode_requests_served);
+            addField('pro_mode_tokens_generated', pro_mode_tokens_generated);
+            addField('pro_mode_self_requests', pro_mode_self_requests);
+            addField('pro_mode_peak_t_s', pro_mode_peak_t_s);
+            addField('pro_mode_avg_t_s', pro_mode_avg_t_s);
+            addField('pro_mode_low_t_s', pro_mode_low_t_s);
+            addField('pro_mode_response_avg_time', pro_mode_response_avg_time);
+            addField('pro_mode_session_uptime', pro_mode_session_uptime);
+            addField('pro_mode_total_uptime', pro_mode_total_uptime);
+            addField('pro_mode_session_start_time', pro_mode_session_start_time);
+            // Worker mode stats
+            addField('work_mode_tasks_processed', work_mode_tasks_processed);
+            addField('work_mode_tasks_failed', work_mode_tasks_failed);
+            addField('work_mode_total_detections', work_mode_total_detections);
+            addField('work_mode_avg_processing_time', work_mode_avg_processing_time);
+            addField('work_mode_session_uptime', work_mode_session_uptime);
+            addField('work_mode_total_uptime', work_mode_total_uptime);
+            addField('work_mode_session_start_time', work_mode_session_start_time);
+            // Node-level stats
+            addField('node_total_uptime', node_total_uptime);
+            addField('node_last_active_time', node_last_active_time);
 
             if (Object.keys(fields).length === 0) {
                 return res.status(400).json({

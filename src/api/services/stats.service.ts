@@ -27,14 +27,28 @@ export class StatsService {
 
         return {
             node_id,
-            served_requests: stats?.served_requests ?? 0,
-            tokens_generated: stats?.tokens_generated ?? 0,
-            self_requests: stats?.self_requests ?? 0,
-            session_uptime: stats?.session_uptime ?? 0,
-            peak_t_s: stats?.peak_t_s ?? 0,
-            avg_t_s: stats?.avg_t_s ?? 0,
-            low_t_s: stats?.low_t_s ?? 0,
-            response_avg_time: stats?.response_avg_time ?? 0,
+            // Provider mode stats
+            pro_mode_requests_served: stats?.pro_mode_requests_served ?? 0,
+            pro_mode_tokens_generated: stats?.pro_mode_tokens_generated ?? 0,
+            pro_mode_self_requests: stats?.pro_mode_self_requests ?? 0,
+            pro_mode_peak_t_s: stats?.pro_mode_peak_t_s ?? 0,
+            pro_mode_avg_t_s: stats?.pro_mode_avg_t_s ?? 0,
+            pro_mode_low_t_s: stats?.pro_mode_low_t_s ?? 0,
+            pro_mode_response_avg_time: stats?.pro_mode_response_avg_time ?? 0,
+            pro_mode_session_uptime: stats?.pro_mode_session_uptime ?? 0,
+            pro_mode_total_uptime: stats?.pro_mode_total_uptime ?? 0,
+            pro_mode_session_start_time: stats?.pro_mode_session_start_time ?? null,
+            // Worker mode stats
+            work_mode_tasks_processed: stats?.work_mode_tasks_processed ?? 0,
+            work_mode_tasks_failed: stats?.work_mode_tasks_failed ?? 0,
+            work_mode_total_detections: stats?.work_mode_total_detections ?? 0,
+            work_mode_avg_processing_time: stats?.work_mode_avg_processing_time ?? 0,
+            work_mode_session_uptime: stats?.work_mode_session_uptime ?? 0,
+            work_mode_total_uptime: stats?.work_mode_total_uptime ?? 0,
+            work_mode_session_start_time: stats?.work_mode_session_start_time ?? null,
+            // Node-level stats
+            node_total_uptime: stats?.node_total_uptime ?? 0,
+            node_last_active_time: stats?.node_last_active_time ?? null,
             created_at: stats?.created_at ?? null,
             updated_at: stats?.updated_at ?? null,
         };
