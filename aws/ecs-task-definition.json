@@ -1,0 +1,59 @@
+{
+  "family": "gptee-relay",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::144273780915:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::144273780915:role/gpteeRelayTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "gptee-relay",
+      "image": "144273780915.dkr.ecr.us-east-1.amazonaws.com/gptee-relay:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 9293,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "PORT",
+          "value": "9293"
+        },
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "REDIS_URL",
+          "value": "redis://gptee-redis.XXXXXX.ng.0001.use1.cache.amazonaws.com:6379"
+        },
+        {
+          "name": "SQS_QUEUE_URL",
+          "value": "https://sqs.us-east-1.amazonaws.com/144273780915/gptee-image-tasks"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/gptee-relay",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "node -e \"require('http').get('http://localhost:9293/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1);})\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

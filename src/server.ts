@@ -29,15 +29,22 @@ import {
 } from './types';
 import { ImageAnalysisCoordinator } from './ImageAnalysisCoordinator';
 import { getTaskCreatorService } from './services/TaskCreatorService';
+import { getSQSTaskCreator } from './services/SQSTaskCreator';
+import { getRedisService } from './services/RedisService';
 import logger from './utils/logger';
 
 const PORT = parseInt(process.env.PORT || '9293', 10);
 
+// ── Redis Service (Distributed State) ────────────────────────────────────────
+const redis = getRedisService();
+const instanceId = redis.getInstanceId();
+
 // ── Image Analysis Coordinator ────────────────────────────────────────────────
 const imageCoordinator = new ImageAnalysisCoordinator();
 
-// ── Task Creator Service ──────────────────────────────────────────────────────
-const taskCreatorService = getTaskCreatorService(imageCoordinator);
+// ── Task Creator Services ─────────────────────────────────────────────────────
+const taskCreatorService = getTaskCreatorService(imageCoordinator); // Fallback (S3 polling)
+const sqsTaskCreator = getSQSTaskCreator(imageCoordinator); // Preferred (event-driven)
 
 // ── Peer Registry ─────────────────────────────────────────────────────────────
 interface ProviderMetrics {
@@ -102,28 +109,11 @@ function calculateLoad(metrics?: ProviderMetrics): number {
   return jobWeight + queueWeight + responseWeight;
 }
 
-function broadcastProviderList() {
-  const providerList: ProviderInfo[] = [];
-  
-  logger.info(`[Relay] Building provider list from ${peers.size} peers`);
-  peers.forEach((peer) => {
-    logger.debug(`[Relay] Peer: ${peer.peerId.substring(0, 8)} - ${peer.deviceInfo.displayName} (accepting: ${peer.deviceInfo.acceptingJobs})`);
+async function broadcastProviderList() {
+  // Get ALL providers from Redis (across all instances)
+  const providerList = await redis.getAllProviders();
 
-    // A peer is an available provider if they are accepting jobs
-    if (peer.deviceInfo.acceptingJobs) {
-      providerList.push({
-        peerId: peer.peerId,
-        modelName: peer.deviceInfo.modelName ?? 'unknown',
-        platform: peer.deviceInfo.platform,
-        displayName: peer.deviceInfo.displayName,
-      });
-    }
-  });
-
-  logger.info(`[Relay] Broadcasting ${providerList.length} providers to ${peers.size} peers`);
-  providerList.forEach((p, i) => {
-    logger.debug(`[Relay] Provider ${i + 1}: ${p.displayName} (${p.peerId.substring(0, 8)})`);
-  });
+  logger.info(`[Relay] Broadcasting ${providerList.length} providers (global) to ${peers.size} local peers`);
 
   // Sort providers by load (least loaded first) for load balancing
   providerList.sort((a, b) => {
@@ -132,32 +122,22 @@ function broadcastProviderList() {
     return loadA - loadB;
   });
 
-  // Send updated list to all connected peers
-  // Include all providers (including the peer itself if they're a provider)
+  // Send updated list to all connected peers on THIS instance
+  // (Each instance broadcasts to its own peers via sticky sessions)
   peers.forEach((peer) => {
     send(peer.socket, {
       type: 'provider_list',
       id: uuidv4(),
       from: 'relay',
       timestamp: Date.now(),
-      providers: providerList,
+      providers: providerList, // ← Global provider list from Redis
     });
   });
 }
 
-function getProviders(): ProviderInfo[] {
-  const list: ProviderInfo[] = [];
-  peers.forEach((peer) => {
-    // A peer is an available provider if they are accepting jobs
-    if (peer.deviceInfo.acceptingJobs) {
-      list.push({
-        peerId: peer.peerId,
-        modelName: peer.deviceInfo.modelName ?? 'unknown',
-        platform: peer.deviceInfo.platform,
-        displayName: peer.deviceInfo.displayName,
-      });
-    }
-  });
+async function getProviders(): Promise<ProviderInfo[]> {
+  // Get all providers from Redis (global view)
+  const list = await redis.getAllProviders();
 
   // Sort providers by load (least loaded first) for load balancing
   list.sort((a, b) => {
@@ -184,7 +164,7 @@ function sendErrorToConsumer(consumerId: string, requestId: string, errorCode: s
   }
 }
 
-function handleProviderFailure(failedProviderId: string) {
+async function handleProviderFailure(failedProviderId: string) {
   // Find all requests assigned to this provider
   const failedRequests = Array.from(activeRequests.values())
     .filter(ctx => ctx.providerId === failedProviderId && ctx.status === 'active');
@@ -204,7 +184,7 @@ function handleProviderFailure(failedProviderId: string) {
     }
 
     // Find next best provider (excluding failed one)
-    const availableProviders = getProviders().filter(p => p.peerId !== failedProviderId);
+    const availableProviders = (await getProviders()).filter(p => p.peerId !== failedProviderId);
 
     if (availableProviders.length === 0) {
       logger.error(`[Relay] No backup providers for request ${context.requestId}`);
@@ -256,7 +236,7 @@ function handleProviderFailure(failedProviderId: string) {
 }
 
 // ── Message Router ────────────────────────────────────────────────────────────
-function routeMessage(senderPeerId: string, raw: string) {
+async function routeMessage(senderPeerId: string, raw: string) {
   let msg: GPTeeMessage;
   try {
     msg = JSON.parse(raw) as GPTeeMessage;
@@ -277,8 +257,20 @@ function routeMessage(senderPeerId: string, raw: string) {
         peer.deviceInfo = reg.deviceInfo;
         logger.info(`[Relay] Updated registration: ${senderPeerId} (acceptingJobs: ${reg.deviceInfo.acceptingJobs}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
+        // Update Redis if provider
+        if (reg.deviceInfo.acceptingJobs) {
+          await redis.registerProvider({
+            peerId: senderPeerId,
+            modelName: reg.deviceInfo.modelName ?? 'unknown',
+            platform: reg.deviceInfo.platform,
+            displayName: reg.deviceInfo.displayName,
+            instanceId,
+          });
+          await redis.publishProviderListUpdate();
+        }
+
         // Broadcast updated provider list
-        broadcastProviderList();
+        await broadcastProviderList();
       }
       break;
     }
@@ -294,8 +286,11 @@ function routeMessage(senderPeerId: string, raw: string) {
         };
         logger.debug(`[Relay] Updated metrics for ${senderPeerId}: activeJobs=${status.metrics.activeJobs}, queueDepth=${status.metrics.queueDepth}`);
 
+        // Refresh heartbeat in Redis
+        await redis.refreshProviderHeartbeat(senderPeerId);
+
         // Broadcast updated provider list (sorted by new metrics)
-        broadcastProviderList();
+        await broadcastProviderList();
       }
       break;
     }
@@ -514,6 +509,16 @@ function routeMessage(senderPeerId: string, raw: string) {
 const app = express();
 app.use(express.json());
 
+// Health check endpoint for ALB
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    peers: peers.size
+  });
+});
+
 // API Routes
 app.use('/api', apiRouter);
 
@@ -590,17 +595,30 @@ wss.on('connection', (socket: WebSocket) => {
 
       logger.info(`[Relay] Registered: ${registeredId} as ${reg.role} (${reg.deviceInfo.platform}) - ${reg.deviceInfo.displayName || 'No displayName'}`);
 
-      // Ack registration
+      // Register provider in Redis if accepting jobs
+      if (reg.deviceInfo.acceptingJobs) {
+        await redis.registerProvider({
+          peerId: registeredId,
+          modelName: reg.deviceInfo.modelName ?? 'unknown',
+          platform: reg.deviceInfo.platform,
+          displayName: reg.deviceInfo.displayName,
+          instanceId,
+        });
+        await redis.publishProviderListUpdate();
+      }
+
+      // Ack registration with current provider list
+      const currentProviders = await getProviders();
       send(socket, {
         type: 'provider_list',
         id: uuidv4(),
         from: 'relay',
         timestamp: Date.now(),
-        providers: getProviders(),
+        providers: currentProviders,
       });
 
       // Always broadcast when a peer registers (provider list may have changed)
-      broadcastProviderList();
+      await broadcastProviderList();
 
       return;
     }
@@ -608,19 +626,21 @@ wss.on('connection', (socket: WebSocket) => {
     routeMessage(registeredId, raw);
   });
 
-  socket.on('close', (code, reason) => {
+  socket.on('close', async (code, reason) => {
     if (registeredId) {
       const peer = peers.get(registeredId);
       logger.info(`[Relay] Disconnected: ${registeredId} (${peer?.role}) - Code: ${code}, Reason: ${reason.toString()}`);
 
-      // Check if this was a provider with active requests
+      // Deregister from Redis if was a provider
       if (peer?.deviceInfo.acceptingJobs) {
-        handleProviderFailure(registeredId);
+        await redis.deregisterProvider(registeredId);
+        await redis.publishProviderListUpdate();
+        await handleProviderFailure(registeredId);
       }
 
       peers.delete(registeredId);
       // Always broadcast when a peer disconnects (provider list may have changed)
-      broadcastProviderList();
+      await broadcastProviderList();
     } else {
       logger.info(`[Relay] Disconnected before registration - Code: ${code}`);
     }
@@ -633,22 +653,48 @@ wss.on('connection', (socket: WebSocket) => {
 
 server.listen(PORT, async () => {
   logger.info(`✅  GPTee Relay Server running on http/ws://0.0.0.0:${PORT}`);
+  logger.info(`    Instance ID: ${instanceId}`);
   logger.info(`    Peers connected: ${peers.size}`);
 
-  // Start automatic task creation from S3
+  // Subscribe to Redis pub/sub events for cross-instance communication
+  logger.info('');
+  logger.info('[Redis] Setting up cross-instance communication...');
+  await redis.subscribeToProviderListUpdates(async () => {
+    logger.debug('[Redis] Provider list updated by another instance, rebroadcasting');
+    await broadcastProviderList();
+  });
+  logger.info('[Redis] ✅ Subscribed to provider list updates');
+
+  // Start automatic task creation
   logger.info('');
   logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  logger.info('  AUTOMATIC TASK CREATION ENABLED');
+  logger.info('  AUTOMATIC TASK CREATION');
   logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  logger.info('  The coordinator will automatically:');
-  logger.info('  • Scan S3 bucket for images every 10 minutes');
-  logger.info('  • Create tasks for unprocessed images');
+
+  // Try SQS-based event-driven approach first
+  if (process.env.SQS_QUEUE_URL) {
+    logger.info('  ✅ SQS Event-Driven Mode:');
+    logger.info('  • S3 uploads trigger SQS events (instant)');
+    logger.info('  • All instances consume from queue');
+    logger.info('  • DynamoDB prevents duplicate tasks');
+    await sqsTaskCreator.start();
+  } else {
+    // Fallback to S3 polling
+    logger.info('  ⚠️  SQS not configured, using S3 polling fallback');
+    logger.info('  • Scan S3 bucket every 2 minutes');
+    logger.info('  • Create tasks for unprocessed images');
+    await taskCreatorService.start();
+  }
+
   logger.info('  • Distribute tasks to available workers');
   logger.info('  • Track results in DynamoDB');
   logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   logger.info('');
 
-  await taskCreatorService.start();
+  // Periodic Redis cleanup
+  setInterval(async () => {
+    await redis.cleanupStaleEntries();
+  }, 60_000); // Every minute
 });
 
 // ── Health check every 30s ────────────────────────────────────────────────────
@@ -659,7 +705,7 @@ setInterval(() => {
 }, 30_000);
 
 // ── Zombie Detection & Timeout Monitoring ─────────────────────────────────────
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
 
   for (const [requestId, context] of activeRequests.entries()) {
@@ -686,7 +732,7 @@ setInterval(() => {
           continue;
         }
 
-        const availableProviders = getProviders().filter(p => p.peerId !== context.providerId);
+        const availableProviders = (await getProviders()).filter(p => p.peerId !== context.providerId);
 
         if (availableProviders.length === 0) {
           logger.error(`[Relay] No backup providers for timed out request ${context.requestId}`);

@@ -18,6 +18,20 @@ export const AWS_CONFIG = {
   },
 
   /**
+   * SQS Queue for image upload events
+   */
+  sqs: {
+    queueUrl: process.env.SQS_QUEUE_URL || '',
+  },
+
+  /**
+   * Redis (ElastiCache) for distributed state
+   */
+  redis: {
+    url: process.env.REDIS_URL || 'redis://localhost:6379',
+  },
+
+  /**
    * DynamoDB Tables
    */
   dynamodb: {

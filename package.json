@@ -12,11 +12,13 @@
     "@aws-sdk/client-cloudwatch-logs": "^3.1017.0",
     "@aws-sdk/client-dynamodb": "^3.1014.0",
     "@aws-sdk/client-s3": "^3.1014.0",
+    "@aws-sdk/client-sqs": "^3.1014.0",
     "@aws-sdk/lib-dynamodb": "^3.1014.0",
     "@aws-sdk/s3-request-presigner": "^3.1014.0",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
     "express": "^5.2.1",
+    "ioredis": "^5.4.1",
     "tweetnacl": "^1.0.3",
     "uuid": "^9.0.0",
     "winston": "^3.19.0",
@@ -29,6 +31,7 @@
     "@types/node": "^20.0.0",
     "@types/uuid": "^9.0.0",
     "@types/ws": "^8.5.10",
+    "ioredis-mock": "^8.9.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   }

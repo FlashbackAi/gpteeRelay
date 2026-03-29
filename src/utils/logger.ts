@@ -28,7 +28,7 @@ const baseTransports: winston.transport[] = [
 // Production-only transports
 const productionTransports: winston.transport[] = [
   new WinstonCloudWatch({
-    logGroupName: 'Flashback/ApplicationLogs',
+    logGroupName: 'GpteeRelay/ApplicationLogs',
     logStreamName: `${CONFIG.env}-${new Date().toISOString().split('T')[0]}`,
     awsRegion: AWS_CONFIG.region,
     jsonMessage: true,

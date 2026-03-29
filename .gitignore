@@ -1,3 +1,24 @@
+# Logs
 *.log
-dist/*
-node_modules/*
+debug.log
+
+# Build output
+dist/
+
+# Dependencies (all node_modules folders)
+node_modules/
+
+# CDK output
+infrastructure/cdk.out/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local

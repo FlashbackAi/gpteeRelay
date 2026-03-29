@@ -1,0 +1,23 @@
+{
+  "name": "gptee-relay-infrastructure",
+  "version": "1.0.0",
+  "description": "AWS CDK infrastructure for GpteeRelay backend",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "deploy": "cdk deploy --all",
+    "destroy": "cdk destroy --all",
+    "diff": "cdk diff",
+    "synth": "cdk synth"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.172.0",
+    "constructs": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.172.0",
+    "typescript": "^5.3.3"
+  }
+}

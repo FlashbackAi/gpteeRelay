@@ -1,0 +1,75 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DynamoDBAccess",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:144273780915:table/image-analysis-tasks_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/image-analysis-results_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/node_identifier_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/nodes_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/node_settings_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/node_statistics_v1",
+        "arn:aws:dynamodb:us-east-1:144273780915:table/wallet_challenges_v1"
+      ]
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::gptee-image-analysis",
+        "arn:aws:s3:::gptee-image-analysis/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:144273780915:log-group:GpteeRelay/ApplicationLogs",
+        "arn:aws:logs:us-east-1:144273780915:log-group:GpteeRelay/ApplicationLogs:*"
+      ]
+    },
+    {
+      "Sid": "SQSAccess",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:144273780915:gptee-image-tasks"
+    },
+    {
+      "Sid": "ElastiCacheAccess",
+      "Effect": "Allow",
+      "Action": [
+        "elasticache:DescribeCacheClusters"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
