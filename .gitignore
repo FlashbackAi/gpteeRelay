@@ -10,6 +10,7 @@ node_modules/
 
 # CDK output
 infrastructure/cdk.out/
+infrastructure/node_modules/
 
 # IDE
 .vscode/
