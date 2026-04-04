@@ -68,7 +68,7 @@ export class DynamoDBService {
       new PutCommand({
         TableName: this.TASKS_TABLE,
         Item: {
-          imageId,
+          image_id: imageId, // DynamoDB table uses snake_case for partition key
           imageName,
           s3Bucket,
           s3Key,
@@ -91,7 +91,7 @@ export class DynamoDBService {
     const result = await this.client.send(
       new GetCommand({
         TableName: this.TASKS_TABLE,
-        Key: { imageId },
+        Key: { image_id: imageId }, // DynamoDB table uses snake_case for partition key
       })
     );
     return result.Item || null;
@@ -149,7 +149,7 @@ export class DynamoDBService {
     await this.client.send(
       new UpdateCommand({
         TableName: this.TASKS_TABLE,
-        Key: { imageId },
+        Key: { image_id: imageId }, // DynamoDB table uses snake_case for partition key
         UpdateExpression: `SET ${updateExpression.join(', ')}`,
         ExpressionAttributeNames: expressionAttributeNames,
         ExpressionAttributeValues: expressionAttributeValues,

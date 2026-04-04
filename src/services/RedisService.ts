@@ -309,6 +309,35 @@ class RedisService {
     });
   }
 
+  // ── WebRTC Signaling (Cross-Instance) ────────────────────────────────────────
+
+  /**
+   * Publish WebRTC signaling message for cross-instance routing
+   */
+  async publishWebRTCSignaling(message: any): Promise<void> {
+    await this.pubClient.publish('webrtc:signaling', JSON.stringify(message));
+    logger.debug(`[Redis] Published WebRTC signaling: ${message.type} from ${message.from} to ${message.to}`);
+  }
+
+  /**
+   * Subscribe to WebRTC signaling messages
+   */
+  async subscribeToWebRTCSignaling(callback: (message: any) => void): Promise<void> {
+    await this.subClient.subscribe('webrtc:signaling');
+
+    this.subClient.on('message', (channel, rawMessage) => {
+      if (channel === 'webrtc:signaling') {
+        try {
+          const message = JSON.parse(rawMessage);
+          logger.debug(`[Redis] Received WebRTC signaling: ${message.type} from ${message.from} to ${message.to}`);
+          callback(message);
+        } catch (e) {
+          logger.error('[Redis] Failed to parse WebRTC signaling message:', e);
+        }
+      }
+    });
+  }
+
   // ── Health & Cleanup ──────────────────────────────────────────────────────
 
   /**

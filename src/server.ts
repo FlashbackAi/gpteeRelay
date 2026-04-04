@@ -402,10 +402,13 @@ async function routeMessage(senderPeerId: string, raw: string) {
       if (!offer.to) return;
       const target = peers.get(offer.to);
       if (target) {
+        // Target is on this instance - forward directly
         send(target.socket, { ...offer, from: senderPeerId });
-        logger.debug(`[Relay] WebRTC offer forwarded: ${senderPeerId} → ${offer.to}`);
+        logger.debug(`[Relay] WebRTC offer forwarded locally: ${senderPeerId} → ${offer.to}`);
       } else {
-        logger.warn(`[Relay] WebRTC offer target not found: ${offer.to}`);
+        // Target not on this instance - publish to Redis for cross-instance routing
+        logger.info(`[Relay] WebRTC offer target not local, publishing to Redis: ${senderPeerId} → ${offer.to}`);
+        await redis.publishWebRTCSignaling({ ...offer, from: senderPeerId });
       }
       break;
     }
@@ -415,10 +418,13 @@ async function routeMessage(senderPeerId: string, raw: string) {
       if (!answer.to) return;
       const target = peers.get(answer.to);
       if (target) {
+        // Target is on this instance - forward directly
         send(target.socket, { ...answer, from: senderPeerId });
-        logger.debug(`[Relay] WebRTC answer forwarded: ${senderPeerId} → ${answer.to}`);
+        logger.debug(`[Relay] WebRTC answer forwarded locally: ${senderPeerId} → ${answer.to}`);
       } else {
-        logger.warn(`[Relay] WebRTC answer target not found: ${answer.to}`);
+        // Target not on this instance - publish to Redis for cross-instance routing
+        logger.info(`[Relay] WebRTC answer target not local, publishing to Redis: ${senderPeerId} → ${answer.to}`);
+        await redis.publishWebRTCSignaling({ ...answer, from: senderPeerId });
       }
       break;
     }
@@ -428,10 +434,13 @@ async function routeMessage(senderPeerId: string, raw: string) {
       if (!candidate.to) return;
       const target = peers.get(candidate.to);
       if (target) {
+        // Target is on this instance - forward directly
         send(target.socket, { ...candidate, from: senderPeerId });
-        logger.debug(`[Relay] WebRTC ICE candidate forwarded: ${senderPeerId} → ${candidate.to}`);
+        logger.debug(`[Relay] WebRTC ICE candidate forwarded locally: ${senderPeerId} → ${candidate.to}`);
       } else {
-        logger.warn(`[Relay] WebRTC ICE candidate target not found: ${candidate.to}`);
+        // Target not on this instance - publish to Redis for cross-instance routing
+        logger.info(`[Relay] WebRTC ICE candidate target not local, publishing to Redis: ${senderPeerId} → ${candidate.to}`);
+        await redis.publishWebRTCSignaling({ ...candidate, from: senderPeerId });
       }
       break;
     }
@@ -665,6 +674,20 @@ server.listen(PORT, async () => {
   });
   logger.info('[Redis] ✅ Subscribed to provider list updates');
 
+  // Subscribe to WebRTC signaling for cross-instance routing
+  await redis.subscribeToWebRTCSignaling((message) => {
+    // Check if the target peer is on THIS instance
+    const target = peers.get(message.to);
+    if (target) {
+      logger.info(`[Redis] Received cross-instance WebRTC ${message.type}: ${message.from} → ${message.to} (forwarding locally)`);
+      send(target.socket, message);
+    } else {
+      // Target not on this instance either - message will be handled by the correct instance
+      logger.debug(`[Redis] Received cross-instance WebRTC ${message.type}: ${message.from} → ${message.to} (not on this instance)`);
+    }
+  });
+  logger.info('[Redis] ✅ Subscribed to WebRTC signaling');
+
   // Start automatic task creation
   logger.info('');
   logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -698,11 +721,12 @@ server.listen(PORT, async () => {
 });
 
 // ── Health check every 30s ────────────────────────────────────────────────────
-setInterval(() => {
-  const providersCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
-  const consumersCount = [...peers.values()].filter((p) => !p.deviceInfo.acceptingJobs).length;
-  logger.info(`[Relay] 💓 peers=${peers.size} providers=${providersCount} consumers=${consumersCount} activeRequests=${activeRequests.size}`);
-}, 30_000);
+// NOTE: Heartbeat disabled - misleading in distributed cluster (shows only local instance)
+// setInterval(() => {
+//   const providersCount = [...peers.values()].filter((p) => p.deviceInfo.acceptingJobs).length;
+//   const consumersCount = [...peers.values()].filter((p) => !p.deviceInfo.acceptingJobs).length;
+//   logger.info(`[Relay] 💓 LOCAL peers=${peers.size} providers=${providersCount} consumers=${consumersCount} activeRequests=${activeRequests.size}`);
+// }, 30_000);
 
 // ── Zombie Detection & Timeout Monitoring ─────────────────────────────────────
 setInterval(async () => {
