@@ -93,19 +93,21 @@ export class TaskCreatorService {
           continue;
         }
 
-        // Generate presigned URL for the image
-        const imageUrl = await this.s3Service.generatePresignedUrl(image.key, 3600); // 1 hour expiry
-
-        // Submit task to coordinator
-        const taskId = await this.coordinator.submitTask(
+        // Create task in DynamoDB (periodic assignment will pick it up)
+        const taskResult = await this.dynamoDBService.createTask({
           imageId,
-          imageUrl,
-          'face_detection', // Default analysis type
-          'normal'
-        );
+          imageName: image.key.split('/').pop() || image.key,
+          s3Bucket: this.s3Service.getBucket(),
+          s3Key: image.key,
+          priority: 'normal',
+        });
 
-        console.log(`[TaskCreator] ✅ Created task ${taskId} for image: ${image.key}`);
-        newTasksCreated++;
+        if (taskResult.created) {
+          console.log(`[TaskCreator] ✅ Created task for image: ${image.key} (${taskResult.reason})`);
+          newTasksCreated++;
+        } else {
+          console.log(`[TaskCreator] ⏭️ Skipped image: ${image.key} (${taskResult.reason})`);
+        }
 
         // Stop after creating BATCH_SIZE new tasks
         if (newTasksCreated >= this.BATCH_SIZE) {
@@ -165,19 +167,9 @@ export class TaskCreatorService {
       return null;
     }
 
-    // Generate presigned URL
-    const imageUrl = await this.s3Service.generatePresignedUrl(s3Key, 3600);
-
-    // Submit to coordinator
-    const taskId = await this.coordinator.submitTask(
-      imageId,
-      imageUrl,
-      'face_detection',
-      priority
-    );
-
-    console.log(`[TaskCreator] ✅ Created task ${taskId} for image: ${s3Key}`);
-    return taskId;
+    // Task created in DynamoDB, periodic assignment will pick it up
+    console.log(`[TaskCreator] ✅ Created task for image: ${s3Key} (${result.reason})`);
+    return imageId; // Return imageId as taskId
   }
 }
 

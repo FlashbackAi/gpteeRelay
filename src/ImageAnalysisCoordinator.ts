@@ -16,6 +16,7 @@ import {
   GPTeeMessage,
 } from './types';
 import { getDynamoDBService } from './services/DynamoDBService';
+import { getRedisService } from './services/RedisService';
 
 // ── Worker Registry ───────────────────────────────────────────────────────────
 
@@ -88,80 +89,230 @@ export interface Task {
 // ── Image Analysis Coordinator ────────────────────────────────────────────────
 
 export class ImageAnalysisCoordinator {
+  // Local worker connections (WebSocket refs - each instance manages its own connected workers)
   private workers: Map<string, Worker> = new Map();
+
+  // Services
   private dynamoDBService = getDynamoDBService();
-  private taskQueue: Task[] = [];
+  private redis = getRedisService();
+
+  // Local task tracking (for this instance only)
   private activeTasks: Map<string, Task> = new Map();
   private taskTimeouts: Map<string, NodeJS.Timeout> = new Map();
 
+  // Periodic task assignment
+  private taskAssignmentInterval?: NodeJS.Timeout;
   private heartbeatCheckInterval?: NodeJS.Timeout;
 
   private readonly HEARTBEAT_TIMEOUT_MS = 90_000; // 90 seconds
   private readonly HEARTBEAT_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+  private readonly TASK_ASSIGNMENT_INTERVAL_MS = 5_000; // Check for tasks every 5 seconds
   private readonly DEFAULT_TASK_TIMEOUT_MS = 30_000; // 30 seconds
   private readonly MAX_RETRIES = 3;
 
   constructor() {
     console.log('[ImageCoordinator] Initializing Image Analysis Coordinator');
     this.startHeartbeatMonitoring();
-    this.loadPendingTasksFromDB();
+    // Don't call async loadPendingTasksFromDB() in constructor - call it from initialize()
   }
 
   /**
-   * Load pending tasks from DynamoDB into the task queue
-   * Called on initialization and can be called periodically
+   * Initialize the coordinator (call this after construction)
+   * This is async and should be awaited
    */
-  private async loadPendingTasksFromDB(): Promise<void> {
-    try {
-      console.log('[ImageCoordinator] 🔄 Loading pending tasks from DynamoDB...');
-      const pendingTasks = await this.dynamoDBService.getPendingTasks(100);
+  async initialize(): Promise<void> {
+    console.log('[ImageCoordinator] Starting coordinator initialization...');
 
-      if (pendingTasks.length === 0) {
-        console.log('[ImageCoordinator] No pending tasks found in DynamoDB');
+    // Start periodic task assignment (distributed-safe)
+    this.startPeriodicTaskAssignment();
+
+    // Do an immediate assignment check
+    await this.assignPendingTasks();
+
+    console.log('[ImageCoordinator] ✅ Coordinator initialized successfully');
+  }
+
+  /**
+   * Start periodic task assignment loop
+   * Checks DynamoDB for pending tasks and tries to assign them
+   */
+  private startPeriodicTaskAssignment(): void {
+    console.log(`[ImageCoordinator] Starting periodic task assignment (every ${this.TASK_ASSIGNMENT_INTERVAL_MS}ms)`);
+
+    this.taskAssignmentInterval = setInterval(async () => {
+      try {
+        await this.assignPendingTasks();
+      } catch (error: any) {
+        console.error('[ImageCoordinator] Error in periodic task assignment:', error.message);
+      }
+    }, this.TASK_ASSIGNMENT_INTERVAL_MS);
+  }
+
+  /**
+   * Stop all background processes
+   */
+  shutdown(): void {
+    console.log('[ImageCoordinator] Shutting down...');
+    if (this.taskAssignmentInterval) {
+      clearInterval(this.taskAssignmentInterval);
+    }
+    if (this.heartbeatCheckInterval) {
+      clearInterval(this.heartbeatCheckInterval);
+    }
+  }
+
+  /**
+   * Assign pending tasks to available workers (distributed-safe)
+   * Uses Redis atomic locks to prevent duplicate assignments across instances
+   */
+  private async assignPendingTasks(): Promise<void> {
+    try {
+      // Check if we have any available workers on THIS instance
+      const availableWorkers = Array.from(this.workers.values()).filter(w => {
+        return (
+          w.availableForWork &&
+          w.activeTasks < w.maxConcurrentTasks &&
+          w.modelsLoaded.face_detection === true
+        );
+      });
+
+      if (availableWorkers.length === 0) {
+        // No workers available on this instance, skip
         return;
       }
 
-      console.log(`[ImageCoordinator] Found ${pendingTasks.length} pending tasks in DynamoDB`);
+      // Query DynamoDB for pending tasks (limit to avoid overload)
+      const pendingTasks = await this.dynamoDBService.getPendingTasks(20);
 
-      // Load each pending task into the coordinator's task queue
-      for (const dbTask of pendingTasks) {
-        // Check if task is already in queue or active
-        const alreadyQueued = this.taskQueue.find(t => t.imageId === dbTask.imageId);
-        const alreadyActive = Array.from(this.activeTasks.values()).find(t => t.imageId === dbTask.imageId);
-
-        if (alreadyQueued || alreadyActive) {
-          continue; // Skip duplicates
-        }
-
-        // Generate presigned URL for the image
-        const s3Service = require('./services/S3Service').getS3Service();
-        const imageUrl = await s3Service.generatePresignedUrl(dbTask.s3Key, 3600);
-
-        // Create task object for coordinator
-        const task: Task = {
-          taskId: dbTask.imageId, // Use imageId as taskId for consistency
-          imageId: dbTask.imageId,
-          imageName: dbTask.imageName,
-          imageUrl: imageUrl,
-          analysisType: 'face_detection',
-          priority: dbTask.priority || 'normal',
-          timeout: this.DEFAULT_TASK_TIMEOUT_MS,
-          status: 'pending',
-          retryCount: dbTask.attemptCount || 0,
-          maxRetries: this.MAX_RETRIES,
-        };
-
-        this.taskQueue.push(task);
+      if (pendingTasks.length === 0) {
+        return;
       }
 
-      this.sortTaskQueue();
-      console.log(`[ImageCoordinator] ✅ Loaded ${this.taskQueue.length} pending tasks into queue`);
+      console.log(`[ImageCoordinator] 🔄 Found ${pendingTasks.length} pending tasks, ${availableWorkers.length} available workers`);
 
-      // Try to assign them immediately
-      await this.assignPendingTasks();
+      let assignedCount = 0;
+
+      // Try to assign tasks
+      for (const dbTask of pendingTasks) {
+        // Check if already active on THIS instance
+        if (this.activeTasks.has(dbTask.image_id)) {
+          continue;
+        }
+
+        // Get best available worker
+        const worker = this.selectBestWorker(availableWorkers);
+        if (!worker) {
+          console.log('[ImageCoordinator] No more available workers, stopping assignment');
+          break;
+        }
+
+        // Try to claim this task atomically (distributed lock)
+        const claimed = await this.redis.claimTaskForAssignment(dbTask.image_id, worker.workerId);
+
+        if (!claimed) {
+          console.log(`[ImageCoordinator] ⏭️ Task ${dbTask.image_id} already claimed by another instance, skipping`);
+          continue;
+        }
+
+        // Successfully claimed! Now assign to worker
+        try {
+          // Generate presigned URL for the image
+          const s3Service = require('./services/S3Service').getS3Service();
+          const imageUrl = await s3Service.generatePresignedUrl(dbTask.s3Key, 3600);
+
+          // Create task object
+          const task: Task = {
+            taskId: dbTask.image_id,
+            imageId: dbTask.image_id,
+            imageName: dbTask.imageName,
+            imageUrl: imageUrl,
+            analysisType: 'face_detection',
+            priority: dbTask.priority || 'normal',
+            timeout: this.DEFAULT_TASK_TIMEOUT_MS,
+            status: 'pending',
+            retryCount: dbTask.attemptCount || 0,
+            maxRetries: this.MAX_RETRIES,
+          };
+
+          await this.assignTaskToWorker(task, worker);
+          assignedCount++;
+
+          // Remove worker from available list temporarily
+          const workerIndex = availableWorkers.indexOf(worker);
+          if (workerIndex > -1 && worker.activeTasks >= worker.maxConcurrentTasks) {
+            availableWorkers.splice(workerIndex, 1);
+          }
+        } catch (error: any) {
+          console.error(`[ImageCoordinator] Failed to assign task ${dbTask.image_id}:`, error.message);
+          // Release the lock if assignment failed
+          await this.redis.releaseTaskAssignment(dbTask.image_id);
+        }
+      }
+
+      if (assignedCount > 0) {
+        console.log(`[ImageCoordinator] ✅ Assigned ${assignedCount} tasks to workers`);
+      }
     } catch (error: any) {
-      console.error('[ImageCoordinator] ❌ Failed to load pending tasks from DynamoDB:', error.message);
+      console.error('[ImageCoordinator] ❌ Error in assignPendingTasks:', error.message);
     }
+  }
+
+  /**
+   * Select the best worker for a task based on scoring algorithm
+   */
+  private selectBestWorker(availableWorkers: Worker[]): Worker | null {
+    if (availableWorkers.length === 0) return null;
+
+    // Score each worker
+    const scoredWorkers = availableWorkers.map(worker => ({
+      worker,
+      score: this.calculateWorkerScore(worker),
+    }));
+
+    // Sort by score (highest first)
+    scoredWorkers.sort((a, b) => b.score - a.score);
+
+    return scoredWorkers[0].worker;
+  }
+
+  /**
+   * Calculate worker score for task assignment
+   * Higher score = better candidate
+   */
+  private calculateWorkerScore(worker: Worker): number {
+    let score = 100;
+
+    // Hardware acceleration bonus
+    if (worker.hardwareAcceleration.includes('gpu')) score += 30;
+    if (worker.hardwareAcceleration.includes('npu')) score += 25;
+
+    // Platform preference (iOS generally faster for ML)
+    if (worker.platform === 'ios') score += 10;
+
+    // Thermal status penalty
+    if (worker.thermalStatus === 'severe' || worker.thermalStatus === 'critical') {
+      score -= 50;
+    } else if (worker.thermalStatus === 'moderate') {
+      score -= 20;
+    }
+
+    // Battery level consideration
+    if (worker.batteryLevel < 20) score -= 30;
+    else if (worker.batteryLevel < 50) score -= 10;
+
+    // Network quality
+    if (worker.networkQuality === 'poor') score -= 20;
+
+    // Workload penalty
+    const workloadRatio = worker.activeTasks / worker.maxConcurrentTasks;
+    score -= workloadRatio * 20;
+
+    // Performance history bonus
+    if (worker.avgProcessingTimeMs > 0 && worker.avgProcessingTimeMs < 5000) {
+      score += 15; // Fast worker
+    }
+
+    return score;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -199,12 +350,24 @@ export class ImageAnalysisCoordinator {
       connectedAt: Date.now(),
     };
 
+    // Store locally (for WebSocket reference)
     this.workers.set(workerId, worker);
 
-    // Load any pending tasks from DynamoDB that aren't in queue yet
-    await this.loadPendingTasksFromDB();
+    // Register in Redis (for global visibility across instances)
+    await this.redis.registerWorker({
+      workerId: worker.workerId,
+      deviceName: worker.deviceName,
+      deviceModel: worker.deviceModel,
+      platform: worker.platform,
+      instanceId: this.redis.getInstanceId(),
+      connectedAt: worker.connectedAt,
+      lastHeartbeat: worker.lastHeartbeat,
+      availableForWork: worker.availableForWork,
+      activeTasks: worker.activeTasks,
+      maxConcurrentTasks: worker.maxConcurrentTasks,
+    });
 
-    // Try to assign pending tasks
+    // Try to assign pending tasks immediately
     await this.assignPendingTasks();
   }
 
@@ -214,25 +377,32 @@ export class ImageAnalysisCoordinator {
     const worker = this.workers.get(workerId);
     if (!worker) return;
 
-    // Reassign active tasks
+    // Handle active tasks on this worker
     for (const [taskId, task] of this.activeTasks) {
       if (task.workerId === workerId) {
-        console.log(`[ImageCoordinator] ♻️ Reassigning task ${taskId} (worker offline)`);
-        task.status = 'pending';
-        task.workerId = undefined;
-        task.retryCount++;
-        this.taskQueue.push(task);
+        console.log(`[ImageCoordinator] ♻️ Releasing task ${taskId} (worker offline)`);
+
+        // Release Redis lock and update DynamoDB status back to pending
+        await this.redis.releaseTaskAssignment(taskId);
+        await this.dynamoDBService.updateTaskStatus(task.imageId, 'pending', {
+          attemptCount: task.retryCount + 1
+        });
+
         this.activeTasks.delete(taskId);
+        this.clearTaskTimeout(taskId);
       }
     }
 
+    // Remove from local workers
     this.workers.delete(workerId);
 
-    // Try to assign reassigned tasks
-    await this.assignPendingTasks();
+    // Remove from Redis (global registry)
+    await this.redis.deregisterWorker(workerId);
+
+    console.log(`[ImageCoordinator] ✅ Worker ${workerId} fully deregistered from instance and Redis`);
   }
 
-  updateWorkerHeartbeat(msg: WorkerHeartbeatMessage): void {
+  async updateWorkerHeartbeat(msg: WorkerHeartbeatMessage): Promise<void> {
     const worker = this.workers.get(msg.from);
     if (!worker) return;
 
@@ -240,6 +410,9 @@ export class ImageAnalysisCoordinator {
     worker.thermalStatus = msg.thermalStatus;
     worker.batteryLevel = msg.batteryLevel;
     worker.activeTasks = msg.activeTasks;
+
+    // Sync to Redis (for global visibility and cross-instance monitoring)
+    await this.redis.updateWorkerHeartbeat(msg.from, msg.activeTasks);
   }
 
   updateWorkerStatus(msg: WorkerStatusMessage): void {
@@ -281,136 +454,6 @@ export class ImageAnalysisCoordinator {
   // ═══════════════════════════════════════════════════════════════════════════
   // Task Management
   // ═══════════════════════════════════════════════════════════════════════════
-
-  async submitTask(
-    imageId: string,
-    imageUrl: string,
-    analysisType: string,
-    priority: 'low' | 'normal' | 'high' = 'normal'
-  ): Promise<string> {
-    const taskId = uuidv4();
-
-    // Extract clean filename from URL (remove query parameters)
-    const urlPath = imageUrl.split('?')[0]; // Remove query string
-    const imageName = urlPath.split('/').pop() || 'unknown';
-
-    const task: Task = {
-      taskId,
-      imageId,
-      imageName,
-      imageUrl,
-      analysisType,
-      priority,
-      timeout: this.DEFAULT_TASK_TIMEOUT_MS,
-      status: 'pending',
-      retryCount: 0,
-      maxRetries: this.MAX_RETRIES,
-    };
-
-    console.log(`[ImageCoordinator] 📥 Task submitted: ${taskId} (${analysisType})`);
-
-    this.taskQueue.push(task);
-    this.sortTaskQueue(); // Sort by priority
-
-    // Try immediate assignment
-    await this.assignPendingTasks();
-
-    return taskId;
-  }
-
-  private sortTaskQueue(): void {
-    const priorityOrder = { high: 3, normal: 2, low: 1 };
-    this.taskQueue.sort((a, b) => {
-      return priorityOrder[b.priority] - priorityOrder[a.priority];
-    });
-  }
-
-  private async assignPendingTasks(): Promise<void> {
-    if (this.taskQueue.length === 0) return;
-
-    console.log(`[ImageCoordinator] 🔄 Attempting to assign ${this.taskQueue.length} pending tasks`);
-
-    const tasksToAssign = [...this.taskQueue];
-    this.taskQueue = [];
-
-    for (const task of tasksToAssign) {
-      const worker = this.selectBestWorker(task);
-
-      if (!worker) {
-        console.log(`[ImageCoordinator] ⏳ No available worker for task ${task.taskId}, re-queuing`);
-        this.taskQueue.push(task);
-        continue;
-      }
-
-      await this.assignTaskToWorker(task, worker);
-    }
-  }
-
-  private selectBestWorker(task: Task): Worker | null {
-    const availableWorkers = Array.from(this.workers.values()).filter(w => {
-      return (
-        w.availableForWork &&
-        w.activeTasks < w.maxConcurrentTasks &&
-        w.modelsLoaded[task.analysisType as keyof typeof w.modelsLoaded] === true
-      );
-    });
-
-    if (availableWorkers.length === 0) return null;
-
-    // Score each worker
-    const scoredWorkers = availableWorkers.map(worker => ({
-      worker,
-      score: this.calculateWorkerScore(worker),
-    }));
-
-    // Sort by score (higher is better)
-    scoredWorkers.sort((a, b) => b.score - a.score);
-
-    return scoredWorkers[0].worker;
-  }
-
-  private calculateWorkerScore(worker: Worker): number {
-    let score = 100;
-
-    // Thermal penalty
-    const thermalPenalty = {
-      nominal: 0,
-      light: -5,
-      moderate: -20,
-      severe: -50,
-      critical: -100,
-    };
-    score += thermalPenalty[worker.thermalStatus];
-
-    // Battery penalty
-    if (worker.batteryLevel < 20) score -= 30;
-    else if (worker.batteryLevel < 50) score -= 10;
-
-    // Workload penalty
-    const workloadRatio = worker.activeTasks / worker.maxConcurrentTasks;
-    score -= workloadRatio * 20;
-
-    // Performance bonus (faster workers get higher score)
-    if (worker.avgProcessingTimeMs > 0) {
-      const performanceBonus = Math.max(0, (5000 - worker.avgProcessingTimeMs) / 100);
-      score += performanceBonus;
-    }
-
-    // Hardware acceleration bonus
-    if (worker.hardwareAcceleration.includes('qnn')) score += 10;
-    else if (worker.hardwareAcceleration.includes('nnapi')) score += 5;
-
-    // Network quality bonus
-    const networkBonus = {
-      excellent: 10,
-      good: 5,
-      fair: -5,
-      poor: -20,
-    };
-    score += networkBonus[worker.networkQuality as keyof typeof networkBonus] || 0;
-
-    return score;
-  }
 
   private async assignTaskToWorker(task: Task, worker: Worker): Promise<void> {
     console.log(`[ImageCoordinator] ➡️ Assigning task ${task.taskId} to worker ${worker.workerId}`);
@@ -457,7 +500,7 @@ export class ImageAnalysisCoordinator {
     task.startedAt = Date.now();
   }
 
-  handleTaskReject(msg: TaskRejectMessage): void {
+  async handleTaskReject(msg: TaskRejectMessage): Promise<void> {
     const task = this.activeTasks.get(msg.taskId);
     if (!task) return;
 
@@ -469,17 +512,23 @@ export class ImageAnalysisCoordinator {
     this.activeTasks.delete(msg.taskId);
     this.clearTaskTimeout(msg.taskId);
 
-    // Re-queue for retry
-    task.status = 'pending';
-    task.workerId = undefined;
+    // Release Redis lock
+    await this.redis.releaseTaskAssignment(msg.taskId);
+
+    // Increment retry count
     task.retryCount++;
 
     if (task.retryCount < task.maxRetries) {
-      this.taskQueue.push(task);
-      this.assignPendingTasks();
+      // Update DynamoDB status back to pending for retry
+      await this.dynamoDBService.updateTaskStatus(task.imageId, 'pending', {
+        attemptCount: task.retryCount
+      });
+      console.log(`[ImageCoordinator] ♻️ Task ${msg.taskId} marked pending for retry (attempt ${task.retryCount}/${task.maxRetries})`);
     } else {
       console.log(`[ImageCoordinator] ⛔ Task failed after ${task.retryCount} retries: ${msg.taskId}`);
-      task.status = 'failed';
+      await this.dynamoDBService.updateTaskStatus(task.imageId, 'failed', {
+        attemptCount: task.retryCount
+      });
     }
   }
   async handleTaskResult(msg: TaskResultMessage): Promise<void> {
@@ -554,17 +603,20 @@ export class ImageAnalysisCoordinator {
     this.activeTasks.delete(msg.taskId);
     this.clearTaskTimeout(msg.taskId);
 
+    // Release Redis lock
+    await this.redis.releaseTaskAssignment(msg.taskId);
+
     // Retry if retryable
     if (msg.retryable && task.retryCount < task.maxRetries) {
       console.log(`[ImageCoordinator] ♻️ Retrying task ${msg.taskId} (attempt ${task.retryCount + 1}/${task.maxRetries})`);
-      task.status = "pending";
-      task.workerId = undefined;
       task.retryCount++;
-      this.taskQueue.push(task);
 
-      // Exponential backoff
-      const delayMs = Math.min(1000 * Math.pow(2, task.retryCount), 60000);
-      setTimeout(() => this.assignPendingTasks(), delayMs);
+      // Update DynamoDB status back to pending for retry with exponential backoff
+      await this.dynamoDBService.updateTaskStatus(task.imageId, 'pending', {
+        attemptCount: task.retryCount
+      });
+
+      console.log(`[ImageCoordinator] Task ${msg.taskId} will be picked up in next assignment cycle`);
     } else {
       console.log(`[ImageCoordinator] ⛔ Task failed permanently: ${msg.taskId}`);
       task.status = "failed";
@@ -592,8 +644,7 @@ export class ImageAnalysisCoordinator {
       }
     }
   }
-  private handleTaskTimeout(taskId: string): void {
-
+  private async handleTaskTimeout(taskId: string): Promise<void> {
     const task = this.activeTasks.get(taskId);
     if (!task || task.status === 'completed') return;
 
@@ -604,16 +655,25 @@ export class ImageAnalysisCoordinator {
 
     this.activeTasks.delete(taskId);
 
+    // Release Redis lock
+    await this.redis.releaseTaskAssignment(taskId);
+
     // Retry
     if (task.retryCount < task.maxRetries) {
-      task.status = 'pending';
-      task.workerId = undefined;
       task.retryCount++;
-      this.taskQueue.push(task);
-      this.assignPendingTasks();
+      console.log(`[ImageCoordinator] ♻️ Task ${taskId} timed out, marking pending for retry (attempt ${task.retryCount}/${task.maxRetries})`);
+
+      // Update DynamoDB status back to pending for retry
+      await this.dynamoDBService.updateTaskStatus(task.imageId, 'pending', {
+        attemptCount: task.retryCount
+      });
     } else {
-      task.status = 'timeout';
-      task.errorMessage = `Task exceeded timeout (${task.timeout}ms)`;
+      console.log(`[ImageCoordinator] ⛔ Task ${taskId} failed permanently after timeout (exceeded ${task.maxRetries} retries)`);
+
+      // Mark as failed in DynamoDB
+      await this.dynamoDBService.updateTaskStatus(task.imageId, 'failed', {
+        attemptCount: task.retryCount
+      });
     }
   }
 
@@ -676,7 +736,6 @@ export class ImageAnalysisCoordinator {
         active: Array.from(this.workers.values()).filter(w => w.activeTasks > 0).length,
       },
       tasks: {
-        pending: this.taskQueue.length,
         active: this.activeTasks.size,
       },
     };

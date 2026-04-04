@@ -457,13 +457,13 @@ async function routeMessage(senderPeerId: string, raw: string) {
 
     case 'worker_deregister': {
       const dereg = msg as WorkerDeregisterMessage;
-      imageCoordinator.deregisterWorker(dereg.workerId);
+      await imageCoordinator.deregisterWorker(dereg.workerId);
       break;
     }
 
     case 'worker_heartbeat': {
       const heartbeat = msg as WorkerHeartbeatMessage;
-      imageCoordinator.updateWorkerHeartbeat(heartbeat);
+      await imageCoordinator.updateWorkerHeartbeat(heartbeat);
       break;
     }
 
@@ -481,19 +481,19 @@ async function routeMessage(senderPeerId: string, raw: string) {
 
     case 'task_reject': {
       const reject = msg as TaskRejectMessage;
-      imageCoordinator.handleTaskReject(reject);
+      await imageCoordinator.handleTaskReject(reject);
       break;
     }
 
     case 'task_result': {
       const result = msg as TaskResultMessage;
-      imageCoordinator.handleTaskResult(result);
+      await imageCoordinator.handleTaskResult(result);
       break;
     }
 
     case 'task_error': {
       const error = msg as TaskErrorMessage;
-      imageCoordinator.handleTaskError(error);
+      await imageCoordinator.handleTaskError(error);
       break;
     }
 
@@ -664,6 +664,16 @@ server.listen(PORT, async () => {
   logger.info(`✅  GPTee Relay Server running on http/ws://0.0.0.0:${PORT}`);
   logger.info(`    Instance ID: ${instanceId}`);
   logger.info(`    Peers connected: ${peers.size}`);
+
+  // Initialize ImageAnalysisCoordinator
+  logger.info('');
+  logger.info('[Coordinator] Initializing ImageAnalysisCoordinator...');
+  try {
+    await imageCoordinator.initialize();
+    logger.info('[Coordinator] ✅ ImageAnalysisCoordinator initialized successfully');
+  } catch (error: any) {
+    logger.error(`[Coordinator] ❌ Failed to initialize ImageAnalysisCoordinator: ${error.message}`);
+  }
 
   // Subscribe to Redis pub/sub events for cross-instance communication
   logger.info('');
